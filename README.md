@@ -67,6 +67,27 @@ That's it. Leave it running and you'll get texts when markets move.
 
 ---
 
+## Public Web App (Persistent URL)
+
+If you want to share Market Sentinel with anyone via a normal URL (not localhost),
+deploy to Render using the included `render.yaml`.
+
+### One-time setup
+
+1. Push this repo to GitHub.
+2. Open Render Blueprint deploy:
+   `https://render.com/deploy?repo=https://github.com/evanmcgoogan/Market-Sentinel`
+3. Confirm service creation in Render (this uses:
+   - `gunicorn` web server
+   - persistent disk at `/var/data`
+   - health check at `/api/stats`)
+4. When deploy finishes, Render gives you a stable URL like:
+   `https://market-sentinel.onrender.com`
+
+You can text that URL to anyone, and they can open it directly.
+
+---
+
 ## How to Stop It
 
 Press `Ctrl+C` in the Terminal window.

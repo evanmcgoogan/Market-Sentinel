@@ -1,9 +1,9 @@
 {
   "twilio": {
-    "account_sid": "YOUR_TWILIO_ACCOUNT_SID",
-    "auth_token": "YOUR_TWILIO_AUTH_TOKEN",
-    "from_number": "+12345678901",
-    "to_number": "+10987654321"
+    "account_sid": "",
+    "auth_token": "",
+    "from_number": "",
+    "to_number": ""
   },
   "signals": {
     "price_velocity_min_change": 5.0,

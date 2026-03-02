@@ -46,7 +46,23 @@ app = Flask(
     static_url_path="/static",
 )
 
-config = load_config(str(ROOT_DIR / "config.json"))
+# Config resolution order:
+# 1) SENTINEL_CONFIG env var (explicit override)
+# 2) repo-local config.json (developer/local mode)
+# 3) config.example.json (safe defaults for hosted demo)
+_cfg_env = os.environ.get("SENTINEL_CONFIG", "").strip()
+_cfg_local = ROOT_DIR / "config.json"
+_cfg_example = ROOT_DIR / "config.example.json"
+if _cfg_env:
+    _cfg_path = _cfg_env
+elif _cfg_local.exists():
+    _cfg_path = str(_cfg_local)
+elif _cfg_example.exists():
+    _cfg_path = str(_cfg_example)
+else:
+    _cfg_path = None
+
+config = load_config(_cfg_path)
 db = Database(str(ROOT_DIR / config.db_path))
 
 # Read Anthropic key from config (or environment variable fallback)
@@ -824,8 +840,10 @@ def api_thesis_action(thesis_key: str):
 
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5050"))
+    public_hint = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{port}")
     logger.info("=" * 55)
     logger.info("Market Sentinel Dashboard starting...")
-    logger.info("Open http://localhost:5050 in your browser")
+    logger.info("Open %s in your browser", public_hint)
     logger.info("=" * 55)
-    app.run(host="0.0.0.0", port=5050, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

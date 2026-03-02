@@ -501,6 +501,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
 
     # Override news API key from env
     config.news.newsapi_key = os.environ.get("NEWSAPI_KEY", config.news.newsapi_key)
+    # Override DB path from env (useful for hosted deployments with mounted disks)
+    config.db_path = os.environ.get("SENTINEL_DB_PATH", config.db_path)
 
     # Validate and log warnings
     warnings = _validate_config(config)
