@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Market Sentinel — 24/48h Outlook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800;900&family=Source+Serif+4:ital,wght@0,300;0,400;0,600;1,400&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --page-bg:      #F8EFE3;
+      --card-bg:      #FFFDF9;
+      --card-border:  #DDD0C0;
+      --divider:      #C8B8A4;
+      --text-1:       #1C1714;
+      --text-2:       #5A4D43;
+      --text-3:       #8C7D72;
+      --text-inv:     #FBF0E4;
+      --masthead-bg:  #1C1714;
+      --accent:       #E07B2A;
+      --up:           #1A7A34;
+      --up-bg:        #E8F5ED;
+      --down:         #B01C1C;
+      --down-bg:      #FDEDED;
+      --neutral:      #5A4D43;
+      --regime-off-bg: #2D0A0A;
+      --regime-on-bg:  #0A2D16;
+      --regime-neu-bg: #1C1714;
+      --f-display:    'Playfair Display', Georgia, serif;
+      --f-serif:      'Source Serif 4', Georgia, serif;
+      --f-sans:       'Inter', -apple-system, sans-serif;
+      --f-mono:       'JetBrains Mono', 'Courier New', monospace;
+    }
+
+    html {
+      font-size: 16px;
+      scroll-behavior: smooth;
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+    body {
+      background: var(--page-bg);
+      color: var(--text-1);
+      font-family: var(--f-sans);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ─── Masthead ─────────────────────────────────────────── */
+    .masthead { background: var(--masthead-bg); position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 20px rgba(0,0,0,.4); }
+    .masthead-top { max-width: 1400px; margin: 0 auto; padding: 0 28px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; height: 62px; }
+    .masthead-left { display: flex; flex-direction: column; gap: 2px; }
+    .edition-label { font-size: .58rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #666; }
+    .masthead-tagline { font-family: var(--f-serif); font-size: .68rem; font-style: italic; color: #777; }
+    .logo { font-family: var(--f-display); font-size: 1.65rem; font-weight: 800; color: var(--text-inv); letter-spacing: -0.01em; text-decoration: none; text-align: center; white-space: nowrap; }
+    .logo em { color: var(--accent); font-style: normal; }
+    .masthead-right { display: flex; align-items: center; gap: 14px; justify-content: flex-end; }
+    .masthead-date { font-size: .65rem; color: #666; text-align: right; line-height: 1.4; }
+    .masthead-rules { border-top: 3px solid #3A3330; border-bottom: 1px solid #3A3330; height: 3px; background: var(--accent); }
+    .live-pill { display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.15); padding: 4px 10px; border-radius: 20px; font-size: .65rem; font-weight: 600; letter-spacing: .06em; color: #bbb; }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse-o 2s infinite; }
+    @keyframes pulse-o { 0%,100%{box-shadow:0 0 0 0 rgba(224,123,42,.4)} 70%{box-shadow:0 0 0 6px rgba(224,123,42,0)} }
+
+    /* ─── Nav tabs ─────────────────────────────────────────── */
+    .nav-tabs { background: #151210; border-bottom: 1px solid #2A2522; }
+    .nav-tabs-inner { max-width: 1400px; margin: 0 auto; padding: 0 28px; display: flex; }
+    .nav-tab { display: inline-flex; align-items: center; gap: 7px; padding: 10px 20px; font-size: .75rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; text-decoration: none; color: #888; border-bottom: 3px solid transparent; transition: color .15s, border-color .15s; }
+    .nav-tab:hover { color: #ccc; }
+    .nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .nav-tab svg { opacity: .7; }
+    .nav-tab.active svg { opacity: 1; }
+
+    /* ─── Container ────────────────────────────────────────── */
+    .container { max-width: 1400px; margin: 0 auto; padding: 0 28px 60px; }
+
+    /* ─── Regime banner ────────────────────────────────────── */
+    .regime-banner {
+      margin: 24px 0 0;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    .regime-inner {
+      padding: 24px 32px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 0 32px;
+      align-items: center;
+    }
+    .regime-banner.risk-off  .regime-inner { background: var(--regime-off-bg); }
+    .regime-banner.risk-on   .regime-inner { background: var(--regime-on-bg); }
+    .regime-banner.neutral   .regime-inner { background: var(--regime-neu-bg); }
+    .regime-banner.mixed     .regime-inner { background: #1A1A0D; }
+
+    .regime-label-block { text-align: center; padding-right: 32px; border-right: 1px solid rgba(255,255,255,.1); }
+    .regime-eyebrow { font-size: .55rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; color: rgba(255,255,255,.4); margin-bottom: 6px; }
+    .regime-label {
+      font-family: var(--f-display); font-size: 1.6rem; font-weight: 900;
+      letter-spacing: .04em; line-height: 1;
+    }
+    .risk-off  .regime-label { color: #FF6B6B; }
+    .risk-on   .regime-label { color: #6BFF9E; }
+    .neutral   .regime-label { color: #AAAAAA; }
+    .mixed     .regime-label { color: #FFD166; }
+
+    .regime-summary {
+      font-family: var(--f-serif); font-size: .92rem; line-height: 1.7;
+      color: rgba(255,255,255,.82);
+    }
+    .regime-note-block { text-align: right; }
+    .regime-note-label { font-size: .55rem; letter-spacing: .1em; text-transform: uppercase; color: rgba(255,255,255,.3); margin-bottom: 5px; }
+    .regime-note { font-family: var(--f-serif); font-size: .78rem; font-style: italic; color: rgba(255,255,255,.5); max-width: 200px; line-height: 1.5; }
+
+    /* ─── Themes bar ───────────────────────────────────────── */
+    .themes-bar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 0 20px; flex-wrap: wrap;
+    }
+    .themes-label { font-size: .6rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); }
+    .theme-chip {
+      font-size: .68rem; font-weight: 500; padding: 4px 10px;
+      border-radius: 20px; background: rgba(224,123,42,.12);
+      color: #9A5A1A; border: 1px solid rgba(224,123,42,.25);
+    }
+
+    /* ─── Horizon toggle ───────────────────────────────────── */
+    .horizon-controls {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 0 16px; border-bottom: 2px solid var(--text-1); margin-bottom: 24px;
+    }
+    .horizon-heading { font-family: var(--f-display); font-size: 1.6rem; font-weight: 800; }
+    .horizon-toggle { display: flex; gap: 0; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 3px; overflow: hidden; }
+    .toggle-btn {
+      padding: 8px 20px; font-size: .72rem; font-weight: 600;
+      letter-spacing: .05em; text-transform: uppercase;
+      background: none; border: none; cursor: pointer;
+      color: var(--text-3); transition: background .15s, color .15s;
+    }
+    .toggle-btn.active { background: var(--text-1); color: var(--text-inv); }
+
+    /* ─── Asset grid ───────────────────────────────────────── */
+    .asset-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 1100px) { .asset-grid { grid-template-columns: repeat(3, 1fr); } }
+    @media (max-width: 800px)  { .asset-grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 500px)  { .asset-grid { grid-template-columns: 1fr; } }
+
+    /* ─── Asset card ───────────────────────────────────────── */
+    .asset-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      transition: box-shadow .15s, transform .15s;
+      position: relative;
+    }
+    .asset-card:hover { box-shadow: 0 6px 24px rgba(28,23,20,.1); transform: translateY(-1px); }
+
+    /* Direction stripe top */
+    .card-top-stripe { height: 3px; }
+    .card-top-stripe.up   { background: var(--up); }
+    .card-top-stripe.down { background: var(--down); }
+    .card-top-stripe.none { background: var(--neutral); }
+
+    /* Card header */
+    .card-header {
+      padding: 14px 16px 10px;
+      display: flex; justify-content: space-between; align-items: flex-start;
+    }
+    .card-meta { display: flex; flex-direction: column; gap: 2px; }
+    .card-category {
+      font-size: .55rem; font-weight: 700; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--text-3);
+    }
+    .card-ticker {
+      font-family: var(--f-mono); font-size: 1rem; font-weight: 600;
+      color: var(--text-1); letter-spacing: .04em;
+    }
+    .card-name { font-size: .7rem; color: var(--text-2); margin-top: 1px; }
+    .card-live {
+      margin-top: 4px;
+      font-family: var(--f-mono);
+      font-size: .6rem;
+      color: var(--text-3);
+    }
+    .card-live .fresh { color: var(--up); }
+    .card-live .delay { color: #9A5A1A; }
+    .card-live .stale { color: var(--down); }
+
+    /* Big direction arrow */
+    .direction-block { text-align: right; }
+    .direction-arrow {
+      font-size: 2.6rem; line-height: 1; font-weight: 900;
+      font-family: var(--f-display);
+      transition: color .2s;
+    }
+    .direction-arrow.up   { color: var(--up); }
+    .direction-arrow.down { color: var(--down); }
+    .direction-arrow.none { color: var(--neutral); opacity: .4; }
+    .direction-word {
+      font-size: .6rem; font-weight: 700; letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    .direction-word.up   { color: var(--up); }
+    .direction-word.down { color: var(--down); }
+    .direction-word.none { color: var(--neutral); }
+
+    /* Magnitude */
+    .magnitude-row {
+      padding: 0 16px 10px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .magnitude-label-text {
+      font-size: .6rem; font-weight: 700; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--text-3); white-space: nowrap;
+    }
+    .magnitude-pips { display: flex; gap: 3px; align-items: center; }
+    .pip {
+      width: 14px; height: 7px; border-radius: 2px;
+      background: var(--card-border);
+      transition: background .2s;
+    }
+    .pip.filled.up   { background: var(--up); }
+    .pip.filled.down { background: var(--down); }
+    .pip.filled.none { background: var(--neutral); }
+    .magnitude-badge {
+      margin-left: auto;
+      font-size: .58rem; font-weight: 700; letter-spacing: .08em;
+      text-transform: uppercase; padding: 3px 7px; border-radius: 2px;
+    }
+    .magnitude-badge.up   { background: var(--up-bg); color: var(--up); }
+    .magnitude-badge.down { background: var(--down-bg); color: var(--down); }
+    .magnitude-badge.none { background: #F0EAE2; color: var(--neutral); }
+
+    /* Confidence meter */
+    .confidence-row {
+      padding: 4px 16px 12px;
+      border-top: 1px solid var(--card-border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .confidence-label { font-size: .6rem; color: var(--text-3); white-space: nowrap; }
+    .confidence-track { flex: 1; height: 5px; background: #EDE5D8; border-radius: 3px; overflow: hidden; }
+    .confidence-fill {
+      height: 100%; border-radius: 3px;
+      background: linear-gradient(90deg, #BFAA94 0%, var(--accent) 60%, #C87A20 100%);
+      transition: width .5s ease;
+    }
+    .confidence-num {
+      font-family: var(--f-mono); font-size: .75rem; font-weight: 600;
+      white-space: nowrap; color: var(--text-1);
+    }
+    .confidence-tier {
+      font-size: .55rem; font-weight: 700; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--text-3);
+    }
+
+    /* Drivers */
+    .drivers-row {
+      padding: 10px 16px 14px;
+      display: flex; flex-direction: column; gap: 5px; flex: 1;
+    }
+    .drivers-label { font-size: .57rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); margin-bottom: 2px; }
+    .driver-item {
+      display: flex; align-items: flex-start; gap: 6px;
+      font-family: var(--f-serif); font-size: .78rem; line-height: 1.4; color: var(--text-2);
+    }
+    .driver-item::before { content: '›'; color: var(--accent); font-weight: 700; flex-shrink: 0; margin-top: -1px; }
+
+    /* ─── Refresh controls ─────────────────────────────────── */
+    .refresh-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 0 0; margin-top: 4px;
+    }
+    .refresh-meta { font-size: .68rem; color: var(--text-3); }
+    .refresh-meta strong { color: var(--text-2); }
+    .refresh-btn {
+      display: flex; align-items: center; gap: 6px;
+      padding: 7px 14px; font-size: .7rem; font-weight: 600;
+      letter-spacing: .04em; text-transform: uppercase;
+      background: var(--text-1); color: var(--text-inv);
+      border: none; border-radius: 3px; cursor: pointer;
+      transition: opacity .15s;
+    }
+    .refresh-btn:hover { opacity: .85; }
+    .refresh-btn:disabled { opacity: .4; cursor: wait; }
+    .refresh-spinner { animation: spin .8s linear infinite; display: none; }
+    .refreshing .refresh-spinner { display: inline-block; }
+    .refreshing .refresh-icon   { display: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── Loading / empty ──────────────────────────────────── */
+    .skeleton-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    @media (max-width: 1100px) { .skeleton-grid { grid-template-columns: repeat(3,1fr); } }
+    @media (max-width: 800px)  { .skeleton-grid { grid-template-columns: repeat(2,1fr); } }
+    .skel-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 4px; padding: 20px; height: 240px; }
+    .skel { background: #EDE5D8; border-radius: 3px; animation: shimmer 1.4s infinite; }
+    @keyframes shimmer { 0%,100%{opacity:1} 50%{opacity:.45} }
+
+    .error-state { text-align: center; padding: 60px 28px; }
+    .error-state strong { display: block; font-size: 1.1rem; margin-bottom: 8px; color: var(--down); }
+    .error-state p { font-size: .85rem; color: var(--text-3); font-family: var(--f-serif); font-style: italic; }
+
+    /* ─── Footer ───────────────────────────────────────────── */
+    .outlook-footer {
+      margin-top: 36px; padding: 20px 0;
+      border-top: 1px solid var(--divider);
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 12px;
+    }
+    .footer-powered { font-size: .68rem; color: var(--text-3); font-family: var(--f-serif); font-style: italic; }
+    .footer-disclaimer { font-size: .62rem; color: var(--text-3); max-width: 500px; line-height: 1.5; }
+
+    /* ─── Sub-nav (Predictions | Track Record) ─────────────── */
+    .sub-nav {
+      display: flex; align-items: center; gap: 0;
+      border-bottom: 2px solid var(--divider);
+      margin: 24px 0 0;
+    }
+    .sub-tab {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 10px 22px; font-size: .75rem; font-weight: 600;
+      letter-spacing: .06em; text-transform: uppercase;
+      background: none; border: none; cursor: pointer;
+      text-decoration: none;
+      color: var(--text-3); border-bottom: 3px solid transparent;
+      margin-bottom: -2px; transition: color .15s, border-color .15s;
+    }
+    .sub-tab:hover { color: var(--text-2); }
+    .sub-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .sub-tab svg { opacity: .6; }
+    .sub-tab.active svg { opacity: 1; }
+
+    /* ─── Evaluation callout (shared visual language with Eval tab) ────── */
+    .tr-reflection {
+      margin-top: 28px; padding: 20px 24px;
+      background: var(--text-1); border-radius: 4px;
+      border-left: 4px solid var(--accent);
+    }
+    .tr-reflection-eyebrow {
+      font-size: .6rem; font-weight: 700; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 10px;
+    }
+    .tr-reflection-text {
+      font-family: var(--f-serif); font-style: italic;
+      font-size: .9rem; line-height: 1.65; color: #E8D8C4;
+    }
+
+    /* ─── Mobile ──────────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .masthead-top {
+        grid-template-columns: 1fr auto;
+        padding: 0 14px;
+      }
+      .masthead-left { display: none; }
+      .logo { text-align: left; font-size: 1.45rem; }
+      .masthead-date { display: none; }
+      .nav-tabs-inner {
+        padding: 0 10px;
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+      }
+      .nav-tab { flex: 0 0 auto; }
+      .container { padding: 0 14px 42px; }
+      .regime-inner {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        padding: 16px 14px;
+      }
+      .regime-label-block {
+        border-right: none;
+        padding-right: 0;
+        text-align: left;
+      }
+      .regime-note-block { text-align: left; }
+      .horizon-controls {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+      }
+      .refresh-bar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+    @media (max-width: 640px) {
+      .sub-nav {
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+      }
+      .sub-tab { flex: 0 0 auto; }
+      .horizon-heading { font-size: 1.35rem; }
+      .toggle-btn { padding: 8px 14px; }
+      .theme-chip {
+        font-size: .62rem;
+        padding: 3px 8px;
+      }
+      .card-header { padding: 12px 12px 8px; }
+      .magnitude-row { padding: 0 12px 10px; }
+      .confidence-row { padding: 4px 12px 10px; }
+      .drivers-row { padding: 10px 12px 12px; }
+      .direction-arrow { font-size: 2.2rem; }
+      .tr-reflection { padding: 14px; }
+      .tr-reflection-text { font-size: .82rem; }
+      .refresh-meta { font-size: .62rem; }
+    }
+    @media (min-width: 700px) and (max-width: 820px) {
+      .container { padding: 0 20px 52px; }
+      .regime-inner {
+        grid-template-columns: auto 1fr;
+        gap: 0 20px;
+        padding: 20px 20px;
+      }
+      .regime-note-block {
+        grid-column: 1 / -1;
+        border-top: 1px solid rgba(255,255,255,.12);
+        margin-top: 10px;
+        padding-top: 10px;
+      }
+      .horizon-controls {
+        flex-direction: row;
+        align-items: flex-end;
+      }
+      .sub-tab { padding: 10px 16px; }
+    }
+    @media (max-width: 430px) {
+      .nav-tabs-inner { padding: 0 8px; }
+      .nav-tab {
+        padding: 9px 12px;
+        font-size: .66rem;
+        gap: 5px;
+      }
+      .container { padding: 0 12px calc(48px + env(safe-area-inset-bottom)); }
+      .sub-tab {
+        padding: 9px 12px;
+        font-size: .64rem;
+        gap: 5px;
+      }
+      .regime-banner { margin-top: 16px; }
+      .regime-inner {
+        padding: 14px 12px;
+        gap: 8px;
+      }
+      .regime-label { font-size: 1.26rem; }
+      .regime-summary {
+        font-size: .84rem;
+        line-height: 1.58;
+      }
+      .regime-note {
+        font-size: .72rem;
+        max-width: none;
+      }
+      .horizon-heading { font-size: 1.18rem; }
+      .toggle-btn {
+        padding: 7px 10px;
+        font-size: .62rem;
+      }
+      .card-ticker { font-size: .92rem; }
+      .direction-arrow { font-size: 2rem; }
+      .driver-item { font-size: .74rem; }
+      .refresh-btn {
+        width: 100%;
+        justify-content: center;
+      }
+      .outlook-footer { gap: 8px; }
+      .footer-disclaimer { font-size: .58rem; }
+    }
+    @media (max-width: 390px) {
+      .logo { font-size: 1.3rem; }
+      .live-pill {
+        padding: 3px 8px;
+        font-size: .6rem;
+      }
+      .nav-tab {
+        padding: 8px 10px;
+        font-size: .62rem;
+      }
+      .sub-tab {
+        padding: 8px 10px;
+        font-size: .62rem;
+      }
+      .theme-chip {
+        font-size: .58rem;
+        padding: 2px 7px;
+      }
+      .confidence-num { font-size: .7rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Masthead ─────────────────────────────────────────────────────────── -->
+<div class="masthead">
+  <div class="masthead-top">
+    <div class="masthead-left">
+      <span class="edition-label">Market Sentinel</span>
+      <span class="masthead-tagline">Prediction market intelligence</span>
+    </div>
+    <a href="/" class="logo">Market <em>Sentinel</em></a>
+    <div class="masthead-right">
+      <div class="masthead-date" id="masthead-date"></div>
+      <div class="live-pill"><span class="live-dot"></span><span>OUTLOOK</span></div>
+    </div>
+  </div>
+  <div class="masthead-rules"></div>
+</div>
+
+<!-- ── Nav ──────────────────────────────────────────────────────────────── -->
+<div class="nav-tabs">
+  <div class="nav-tabs-inner">
+    <a href="/" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      Markets
+    </a>
+    <a href="/whales" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 12c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2s10 4.477 10 10z"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+      Whales
+    </a>
+    <a href="/resolved" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      Resolved
+    </a>
+    <a href="/outlook" class="nav-tab active">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      Outlook
+    </a>
+    <a href="/eval" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="4" y1="19" x2="4" y2="5"/><line x1="10" y1="19" x2="10" y2="11"/><line x1="16" y1="19" x2="16" y2="8"/><line x1="22" y1="19" x2="22" y2="13"/></svg>
+      Eval
+    </a>
+  </div>
+</div>
+
+<!-- ── Main ─────────────────────────────────────────────────────────────── -->
+<div class="container">
+
+  <!-- Evaluation nav -->
+  <div class="sub-nav">
+    <a class="sub-tab active" href="/outlook">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      Predictions
+    </a>
+    <a class="sub-tab" href="/eval#outlook-track-record">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      Evaluation (Track Record)
+    </a>
+  </div>
+
+  <!-- ══════════════════ PREDICTIONS VIEW ══════════════════ -->
+  <div id="view-predictions">
+
+  <!-- Regime banner (rendered by JS) -->
+  <div id="regime-banner" class="regime-banner neutral" style="display:none">
+    <div class="regime-inner">
+      <div class="regime-label-block">
+        <div class="regime-eyebrow">Market Regime</div>
+        <div class="regime-label" id="regime-label">—</div>
+      </div>
+      <div class="regime-summary" id="regime-summary">Loading intelligence…</div>
+      <div class="regime-note-block">
+        <div class="regime-note-label">Key Signal</div>
+        <div class="regime-note" id="regime-note">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Themes bar -->
+  <div class="themes-bar" id="themes-bar" style="display:none">
+    <span class="themes-label">Themes</span>
+    <div id="theme-chips"></div>
+  </div>
+
+  <!-- Horizon controls + grid -->
+  <div id="main-content" style="display:none">
+    <div class="horizon-controls">
+      <div class="horizon-heading">Asset Price Outlook</div>
+      <div style="display:flex; align-items:center; gap:14px">
+        <div class="horizon-toggle">
+          <button class="toggle-btn active" id="btn-24h" onclick="setHorizon('24h')">24 Hour</button>
+          <button class="toggle-btn" id="btn-48h" onclick="setHorizon('48h')">48 Hour</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tr-reflection" style="margin-bottom:16px">
+      <div class="tr-reflection-eyebrow">Live Price Verification</div>
+      <div class="tr-reflection-text">
+        <span id="live-price-summary">Checking current asset quotes…</span>
+        <span style="display:inline-block;margin:0 6px;color:#C8B8A4">|</span>
+        <span id="live-price-stamp">Snapshot: —</span>
+      </div>
+    </div>
+
+    <div class="asset-grid" id="asset-grid"></div>
+
+    <div class="refresh-bar">
+      <div class="refresh-meta">
+        Last updated: <strong id="last-updated">—</strong> &nbsp;·&nbsp;
+        Powered by Polymarket signals + Claude Sonnet &nbsp;·&nbsp;
+        Refreshes every 15 min
+      </div>
+      <button class="refresh-btn" id="refresh-btn" onclick="forceRefresh()">
+        <svg class="refresh-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        <svg class="refresh-spinner" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" opacity=".2"/><path d="M3 12a9 9 0 0 1 9-9"/></svg>
+        Refresh Now
+      </button>
+    </div>
+  </div>
+
+  <!-- Loading skeleton -->
+  <div id="loading-state" style="margin-top:24px">
+    <div style="height:100px;background:#1C1714;border-radius:4px;margin-bottom:20px;animation:shimmer 1.4s infinite;opacity:.4"></div>
+    <div class="skeleton-grid">
+      <div class="skel-card"><div class="skel" style="height:14px;width:40%;margin-bottom:10px"></div><div class="skel" style="height:40px;width:60%;margin-bottom:14px"></div><div class="skel" style="height:8px;margin-bottom:8px"></div><div class="skel" style="height:8px;width:80%"></div></div>
+      <div class="skel-card"><div class="skel" style="height:14px;width:35%;margin-bottom:10px"></div><div class="skel" style="height:40px;width:55%;margin-bottom:14px"></div><div class="skel" style="height:8px;margin-bottom:8px"></div><div class="skel" style="height:8px;width:75%"></div></div>
+      <div class="skel-card"><div class="skel" style="height:14px;width:45%;margin-bottom:10px"></div><div class="skel" style="height:40px;width:50%;margin-bottom:14px"></div><div class="skel" style="height:8px;margin-bottom:8px"></div><div class="skel" style="height:8px;width:85%"></div></div>
+      <div class="skel-card"><div class="skel" style="height:14px;width:38%;margin-bottom:10px"></div><div class="skel" style="height:40px;width:58%;margin-bottom:14px"></div><div class="skel" style="height:8px;margin-bottom:8px"></div><div class="skel" style="height:8px;width:70%"></div></div>
+    </div>
+    <p style="text-align:center;font-size:.8rem;color:#8C7D72;font-style:italic;font-family:'Source Serif 4',serif;margin-top:20px">
+      Claude Sonnet is synthesizing signals from prediction markets and news…
+    </p>
+  </div>
+
+  <!-- Error state -->
+  <div id="error-state" style="display:none" class="error-state">
+    <strong>Unable to generate outlook</strong>
+    <p>Check that the Anthropic API key is configured and the sentinel is running.</p>
+  </div>
+
+  <!-- Footer -->
+  <div class="outlook-footer" id="outlook-footer" style="display:none">
+    <div class="footer-powered">
+      Synthesized from Polymarket prediction markets, news, and signal alerts via Claude Sonnet
+    </div>
+    <div class="footer-disclaimer">
+      Market outlooks are AI-generated predictions based on available signals and are not investment advice.
+      Magnitude and confidence scores reflect signal strength, not guaranteed outcomes.
+    </div>
+  </div>
+
+  </div><!-- /view-predictions -->
+
+</div><!-- /container -->
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────
+let outlookData = null;
+let currentHorizon = '24h';
+let livePriceMap = {};
+
+const MAGNITUDE_PIPS = { SMALL: 1, MODERATE: 2, LARGE: 3, MAJOR: 4 };
+const REGIME_CLASS = { 'RISK-OFF': 'risk-off', 'RISK-ON': 'risk-on', 'NEUTRAL': 'neutral', 'MIXED': 'mixed' };
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtLiveAge(mins) {
+  if (mins == null || Number.isNaN(Number(mins))) return 'age n/a';
+  const m = Number(mins);
+  if (m < 1) return '<1m';
+  if (m < 60) return `${Math.round(m)}m`;
+  const h = m / 60;
+  if (h < 24) return `${h.toFixed(1)}h`;
+  return `${(h / 24).toFixed(1)}d`;
+}
+
+// ── Horizon toggle ───────────────────────────────────────────────────────
+function setHorizon(h) {
+  currentHorizon = h;
+  document.getElementById('btn-24h').classList.toggle('active', h === '24h');
+  document.getElementById('btn-48h').classList.toggle('active', h === '48h');
+  if (outlookData) renderAssets(outlookData);
+}
+
+// ── Build a single asset card ────────────────────────────────────────────
+function buildCard(ticker, assetData) {
+  const pred = assetData[currentHorizon];
+  if (!pred) return '';
+  const live = livePriceMap[ticker] || {};
+
+  const dir   = (pred.direction || '—').toUpperCase();
+  const isUp  = dir === 'UP';
+  const isDown = dir === 'DOWN';
+  const dirClass = isUp ? 'up' : isDown ? 'down' : 'none';
+  const arrow = isUp ? '↑' : isDown ? '↓' : '—';
+  const mag   = pred.magnitude_score || 1;
+  const magLabel = pred.magnitude_label || 'SMALL';
+  const conf  = pred.confidence || 0;
+  const confLabel = pred.confidence_label || 'LOW';
+  const drivers = pred.drivers || [];
+  const pipCount = MAGNITUDE_PIPS[magLabel] || 1;
+  const livePrice = (live.price != null) ? Number(live.price).toLocaleString(undefined, {maximumFractionDigits: 4}) : '—';
+  const ageLabel = fmtLiveAge(live.age_minutes);
+  const freshnessClass = live.freshness === 'live' ? 'fresh' : (live.freshness === 'delayed' ? 'delay' : 'stale');
+  const sourceLabel = live.source_interval || 'n/a';
+
+  const pips = [1,2,3,4].map(i =>
+    `<div class="pip${i <= pipCount ? ` filled ${dirClass}` : ''}"></div>`
+  ).join('');
+
+  const driverHtml = drivers.map(d =>
+    `<div class="driver-item">${esc(d)}</div>`
+  ).join('');
+
+  return `
+    <div class="asset-card">
+      <div class="card-top-stripe ${dirClass}"></div>
+      <div class="card-header">
+        <div class="card-meta">
+          <div class="card-category">${esc(assetData.category || '')}</div>
+          <div class="card-ticker">${esc(ticker)}</div>
+          <div class="card-name">${esc(assetData.name || '')}</div>
+          <div class="card-live">
+            Quote ${esc(livePrice)} · <span class="${freshnessClass}">${esc(String(live.freshness || 'missing'))}</span> · ${esc(ageLabel)} · ${esc(sourceLabel)}
+          </div>
+        </div>
+        <div class="direction-block">
+          <div class="direction-arrow ${dirClass}">${arrow}</div>
+          <div class="direction-word ${dirClass}">${dir}</div>
+        </div>
+      </div>
+
+      <div class="magnitude-row">
+        <span class="magnitude-label-text">Magnitude</span>
+        <div class="magnitude-pips">${pips}</div>
+        <div class="magnitude-badge ${dirClass}">${magLabel}</div>
+      </div>
+
+      <div class="confidence-row">
+        <span class="confidence-label">Confidence</span>
+        <div class="confidence-track">
+          <div class="confidence-fill" style="width:${conf}%"></div>
+        </div>
+        <span class="confidence-num">${conf}</span>
+        <span class="confidence-tier">${esc(confLabel)}</span>
+      </div>
+
+      <div class="drivers-row">
+        <div class="drivers-label">Key Drivers</div>
+        ${driverHtml || '<div style="font-size:.75rem;color:var(--text-3);font-style:italic">No signal data</div>'}
+      </div>
+    </div>`;
+}
+
+// ── Render all assets ────────────────────────────────────────────────────
+function renderAssets(data) {
+  const grid = document.getElementById('asset-grid');
+  const order = data.asset_order || Object.keys(data.assets || {});
+  grid.innerHTML = order.map(ticker => {
+    const a = (data.assets || {})[ticker];
+    return a ? buildCard(ticker, a) : '';
+  }).join('');
+}
+
+// ── Render regime banner ─────────────────────────────────────────────────
+function renderRegime(data) {
+  const banner  = document.getElementById('regime-banner');
+  const regime  = (data.market_regime || 'NEUTRAL').toUpperCase();
+  const cls     = REGIME_CLASS[regime] || 'neutral';
+
+  banner.className = `regime-banner ${cls}`;
+  document.getElementById('regime-label').textContent  = regime.replace('-', '‑');
+  document.getElementById('regime-summary').textContent = data.outlook_summary || '';
+  document.getElementById('regime-note').textContent   = data.generated_note || '';
+  banner.style.display = 'block';
+}
+
+// ── Render themes ────────────────────────────────────────────────────────
+function renderThemes(data) {
+  const bar    = document.getElementById('themes-bar');
+  const chips  = document.getElementById('theme-chips');
+  const themes = data.dominant_themes || [];
+  if (!themes.length) return;
+  chips.innerHTML = themes.map(t => `<span class="theme-chip">${esc(t)}</span>`).join('');
+  bar.style.display = 'flex';
+}
+
+function renderLivePriceVerification(data) {
+  const lp = data.live_prices || {};
+  const s = lp.summary || {};
+  const total = ['live', 'delayed', 'stale', 'missing'].reduce((acc, k) => acc + Number(s[k] || 0), 0);
+  const summary = total
+    ? `${s.live || 0} live · ${s.delayed || 0} delayed · ${s.stale || 0} stale · ${s.missing || 0} missing`
+    : 'No quote data available';
+  document.getElementById('live-price-summary').textContent = summary;
+  const stamp = lp.captured_at ? new Date(lp.captured_at) : null;
+  document.getElementById('live-price-stamp').textContent = stamp
+    ? `Snapshot: ${stamp.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}`
+    : 'Snapshot: —';
+}
+
+// ── Full render ──────────────────────────────────────────────────────────
+function render(data) {
+  outlookData = data;
+  livePriceMap = ((data.live_prices || {}).assets) || {};
+  document.getElementById('loading-state').style.display  = 'none';
+  document.getElementById('error-state').style.display    = 'none';
+  document.getElementById('main-content').style.display   = 'block';
+  document.getElementById('outlook-footer').style.display = 'flex';
+
+  renderRegime(data);
+  renderThemes(data);
+  renderLivePriceVerification(data);
+  renderAssets(data);
+
+  const ts = data.generated_at ? new Date(data.generated_at) : new Date();
+  document.getElementById('last-updated').textContent = ts.toLocaleTimeString();
+}
+
+// ── Force refresh ────────────────────────────────────────────────────────
+async function forceRefresh() {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.parentElement.classList.add('refreshing');
+  document.getElementById('regime-banner').style.display = 'none';
+  document.getElementById('themes-bar').style.display    = 'none';
+  document.getElementById('main-content').style.display  = 'none';
+  document.getElementById('loading-state').style.display = 'block';
+  await load(true);
+  btn.disabled = false;
+  btn.parentElement.classList.remove('refreshing');
+}
+
+// ── Load data ────────────────────────────────────────────────────────────
+async function load(force = false) {
+  try {
+    const url = '/api/outlook' + (force ? '?force=1' : '');
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.assets) throw new Error('Invalid response');
+    render(data);
+  } catch (err) {
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('error-state').style.display   = 'block';
+    console.error('Outlook load error:', err);
+  }
+}
+
+// ── Date header ──────────────────────────────────────────────────────────
+document.getElementById('masthead-date').innerHTML =
+  new Date().toLocaleDateString('en-US', {weekday:'long',year:'numeric',month:'long',day:'numeric'}) +
+  '<br><span style="font-size:.55rem;color:#555">24/48H OUTLOOK</span>';
+
+// ── Boot ─────────────────────────────────────────────────────────────────
+load();
+// Refresh every 15 minutes
+setInterval(() => load(), 15 * 60 * 1000);
+</script>
+</body>
+</html>

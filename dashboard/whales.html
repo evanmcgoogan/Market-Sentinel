@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Market Sentinel — Whale Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* ─── Reset ─────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --page-bg:     #FBF0E4;
+      --card-bg:     #FFFDF9;
+      --card-border: #DDD0C0;
+      --divider:     #C8B8A4;
+      --text-1:      #1C1714;
+      --text-2:      #5A4D43;
+      --text-3:      #8C7D72;
+      --text-inv:    #FBF0E4;
+      --ink:         #1C1714;
+      --masthead-bg: #1C1714;
+      --accent:      #E07B2A;
+      --up:          #1E6B2E;
+      --down:        #B01C1C;
+      --flat:        #7A6E65;
+      --f-display:   'Playfair Display', Georgia, serif;
+      --f-serif:     'Source Serif 4', Georgia, serif;
+      --f-sans:      'Inter', -apple-system, sans-serif;
+    }
+
+    html  {
+      font-size: 16px;
+      scroll-behavior: smooth;
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+    body  {
+      background: var(--page-bg);
+      color: var(--text-1);
+      font-family: var(--f-sans);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ─── Masthead ────────────────────────────────────────────────────── */
+    .masthead {
+      background: var(--masthead-bg);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 14px rgba(0,0,0,.3);
+    }
+    .masthead-top {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 0 28px;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      height: 62px;
+    }
+    .masthead-left { display: flex; flex-direction: column; gap: 2px; }
+    .edition-label {
+      font-size: .58rem; font-weight: 600; letter-spacing: .12em;
+      text-transform: uppercase; color: #666;
+    }
+    .masthead-tagline {
+      font-family: var(--f-serif); font-size: .68rem;
+      font-style: italic; color: #777;
+    }
+    .logo {
+      font-family: var(--f-display); font-size: 1.65rem; font-weight: 800;
+      color: var(--text-inv); letter-spacing: -0.01em;
+      text-decoration: none; text-align: center; white-space: nowrap;
+    }
+    .logo em { color: var(--accent); font-style: normal; }
+    .masthead-right { display: flex; align-items: center; gap: 14px; justify-content: flex-end; }
+    .masthead-date { font-size: .65rem; color: #666; text-align: right; line-height: 1.4; }
+    .masthead-rules {
+      border-top: 3px solid #3A3330;
+      border-bottom: 1px solid #3A3330;
+      height: 3px; background: var(--accent); margin: 0;
+    }
+    .live-pill {
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.15);
+      padding: 4px 10px; border-radius: 20px; font-size: .65rem;
+      font-weight: 600; letter-spacing: .06em; color: #bbb;
+    }
+    .live-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: #4CAF50;
+      box-shadow: 0 0 0 0 rgba(76,175,80,.4);
+      animation: pulse 2s infinite;
+    }
+    .live-dot.stale { background: #888; animation: none; }
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(76,175,80,.4); }
+      70%  { box-shadow: 0 0 0 6px rgba(76,175,80,0); }
+      100% { box-shadow: 0 0 0 0 rgba(76,175,80,0); }
+    }
+
+    /* ─── Nav tabs ────────────────────────────────────────────────────── */
+    .nav-tabs {
+      background: #151210;
+      border-bottom: 1px solid #2A2522;
+    }
+    .nav-tabs-inner {
+      max-width: 1360px; margin: 0 auto;
+      padding: 0 28px;
+      display: flex; gap: 0;
+    }
+    .nav-tab {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 10px 20px; font-size: .75rem; font-weight: 600;
+      letter-spacing: .05em; text-transform: uppercase;
+      text-decoration: none; color: #888;
+      border-bottom: 3px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+    .nav-tab:hover { color: #ccc; }
+    .nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .nav-tab svg { opacity: .7; }
+    .nav-tab.active svg { opacity: 1; }
+
+    /* ─── Stats bar ───────────────────────────────────────────────────── */
+    .statsbar {
+      background: var(--card-bg); border-bottom: 1px solid var(--card-border);
+      padding: 8px 28px;
+    }
+    .statsbar-inner {
+      max-width: 1360px; margin: 0 auto;
+      display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+    }
+    .stat { font-size: .72rem; color: var(--text-3); }
+    .stat strong { color: var(--text-1); font-weight: 600; }
+    .statsbar-refresh {
+      margin-left: auto; font-size: .7rem; color: var(--text-3);
+    }
+
+    /* ─── Container ───────────────────────────────────────────────────── */
+    .container { max-width: 1360px; margin: 0 auto; padding: 28px 28px 60px; }
+
+    /* ─── Page header ─────────────────────────────────────────────────── */
+    .page-header {
+      padding: 24px 0 16px;
+      border-bottom: 2px solid var(--text-1);
+      margin-bottom: 24px;
+      display: flex; align-items: flex-end; justify-content: space-between;
+    }
+    .page-header-text h2 {
+      font-family: var(--f-display); font-size: 1.85rem; font-weight: 800;
+      line-height: 1.05; letter-spacing: -.01em;
+    }
+    .page-header-text p {
+      font-family: var(--f-serif); font-size: .85rem; font-style: italic;
+      color: var(--text-2); margin-top: 4px;
+    }
+    .page-header-badge {
+      font-size: .68rem; font-weight: 600; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--accent);
+      border: 1px solid var(--accent); padding: 4px 10px; border-radius: 3px;
+    }
+
+    /* ─── Whale grid (2-col on desktop) ───────────────────────────────── */
+    .whale-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+    @media (max-width: 900px) { .whale-grid { grid-template-columns: 1fr; } }
+
+    /* ─── Whale card ──────────────────────────────────────────────────── */
+    .whale-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 3px;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      transition: box-shadow .15s;
+    }
+    .whale-card:hover { box-shadow: 0 4px 18px rgba(28,23,20,.08); }
+
+    /* Card accent stripe: color-coded by insider score */
+    .whale-card-stripe {
+      height: 4px; background: var(--stripe-color, #5D6D7E);
+    }
+
+    /* Header row */
+    .whale-header {
+      display: flex; align-items: flex-start;
+      justify-content: space-between; gap: 12px;
+      padding: 14px 16px 10px;
+    }
+    .whale-identity { min-width: 0; }
+    .whale-address {
+      font-family: 'Courier New', Courier, monospace;
+      font-size: .75rem; font-weight: 600; color: var(--text-1);
+      letter-spacing: .02em;
+    }
+    .whale-name {
+      font-size: .72rem; color: var(--text-3); margin-left: 6px;
+    }
+    .polymarket-link {
+      display: inline-block; font-size: .65rem; color: var(--accent);
+      text-decoration: none; margin-top: 3px;
+      opacity: .85;
+    }
+    .polymarket-link:hover { opacity: 1; text-decoration: underline; }
+
+    /* Insider score badge */
+    .insider-badge {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 2px; flex-shrink: 0;
+    }
+    .insider-score-num {
+      font-size: 1.45rem; font-weight: 800; line-height: 1;
+      font-family: var(--f-display);
+      color: var(--badge-color, #5D6D7E);
+    }
+    .insider-score-label {
+      font-size: .55rem; font-weight: 600; letter-spacing: .1em;
+      text-transform: uppercase; color: var(--badge-color, #5D6D7E);
+    }
+    .insider-score-sub {
+      font-size: .55rem; color: var(--text-3); letter-spacing: .04em;
+    }
+
+    /* Stats row */
+    .whale-stats {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      padding: 0 16px 12px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .whale-stat { font-size: .7rem; color: var(--text-2); }
+    .whale-stat strong { color: var(--text-1); font-weight: 600; }
+
+    /* Featured trade block */
+    .featured-trade {
+      background: rgba(28,23,20,.03);
+      border-bottom: 1px solid var(--card-border);
+      padding: 12px 16px;
+    }
+    .trade-action-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 5px;
+    }
+    .trade-side {
+      font-size: .65rem; font-weight: 700; letter-spacing: .08em;
+      text-transform: uppercase; padding: 2px 7px; border-radius: 2px;
+    }
+    .trade-side.buy  { background: #E8F5E9; color: #1E6B2E; }
+    .trade-side.sell { background: #FDECEC; color: #B01C1C; }
+    .trade-size {
+      font-family: var(--f-display); font-size: 1.1rem; font-weight: 700;
+    }
+    .trade-prob {
+      font-size: .72rem; color: var(--text-2); margin-left: auto;
+    }
+    .trade-market {
+      font-family: var(--f-serif); font-size: .82rem; color: var(--text-1);
+      line-height: 1.4; margin-bottom: 4px;
+    }
+    .trade-meta {
+      font-size: .68rem; color: var(--text-3);
+      display: flex; gap: 8px; flex-wrap: wrap;
+    }
+    .trade-meta a { color: var(--accent); text-decoration: none; }
+    .trade-meta a:hover { text-decoration: underline; }
+
+    /* Probability bar */
+    .prob-bar-wrap {
+      padding: 10px 16px 12px;
+      border-bottom: 1px solid var(--card-border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .prob-label { font-size: .68rem; color: var(--text-3); white-space: nowrap; }
+    .prob-bar {
+      flex: 1; height: 5px; background: #EDE5D8; border-radius: 3px; overflow: hidden;
+    }
+    .prob-fill {
+      height: 100%; border-radius: 3px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+    .prob-value { font-size: .75rem; font-weight: 600; white-space: nowrap; }
+    .prob-delta {
+      font-size: .68rem; font-weight: 600; white-space: nowrap;
+    }
+    .prob-delta.up   { color: var(--up); }
+    .prob-delta.down { color: var(--down); }
+
+    /* Sparkline */
+    .sparkline-wrap { padding: 8px 16px 4px; }
+    .sparkline-svg { width: 100%; height: 36px; display: block; }
+
+    /* Claude brief sections */
+    .whale-brief {
+      padding: 14px 16px 12px;
+      display: flex; flex-direction: column; gap: 10px;
+      flex: 1;
+    }
+    .brief-section {}
+    .brief-label {
+      font-size: .58rem; font-weight: 700; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--text-3); margin-bottom: 4px;
+    }
+    .brief-text {
+      font-family: var(--f-serif); font-size: .82rem; line-height: 1.55;
+      color: var(--text-2);
+    }
+
+    /* Insider signals */
+    .signal-tags {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      padding: 10px 16px 14px;
+      border-top: 1px solid var(--card-border);
+    }
+    .signal-tag {
+      font-size: .62rem; font-weight: 500; padding: 3px 8px;
+      border-radius: 2px;
+      background: rgba(224,123,42,.10);
+      color: #8A4A0E;
+      border: 1px solid rgba(224,123,42,.20);
+    }
+
+    /* ─── Loading / empty states ──────────────────────────────────────── */
+    .state-msg {
+      text-align: center; padding: 60px 28px;
+      color: var(--text-3); font-size: .9rem;
+    }
+    .state-msg strong { display: block; font-size: 1.1rem; color: var(--text-2); margin-bottom: 8px; }
+
+    /* Skeleton cards */
+    .skeleton-grid {
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;
+    }
+    @media (max-width: 900px) { .skeleton-grid { grid-template-columns: 1fr; } }
+    .skeleton-card {
+      background: var(--card-bg); border: 1px solid var(--card-border);
+      border-radius: 3px; padding: 20px; height: 320px;
+    }
+    .skel { background: #EDE5D8; border-radius: 3px; animation: shimmer 1.5s infinite; }
+    @keyframes shimmer {
+      0%,100% { opacity: 1; }
+      50%      { opacity: .5; }
+    }
+
+    /* ─── Section rule ────────────────────────────────────────────────── */
+    .section-rule {
+      display: flex; align-items: center; gap: 14px;
+      margin: 32px 0 20px;
+      border-top: 2px solid var(--text-1); padding-top: 8px;
+    }
+    .section-label {
+      font-family: var(--f-display); font-size: .85rem; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+    }
+    .section-count {
+      font-size: .72rem; color: var(--text-3);
+      border: 1px solid var(--divider); padding: 2px 8px; border-radius: 2px;
+    }
+
+    /* ─── Footer note ──────────────────────────────────────────────────── */
+    .footer-note {
+      text-align: center; padding: 32px 0 0;
+      font-size: .7rem; color: var(--text-3);
+      border-top: 1px solid var(--divider);
+      font-family: var(--f-serif); font-style: italic;
+    }
+    .footer-note a { color: var(--accent); text-decoration: none; }
+    .footer-note a:hover { text-decoration: underline; }
+
+    /* ─── Mobile ──────────────────────────────────────────────────────── */
+    @media (max-width: 860px) {
+      .masthead-top {
+        grid-template-columns: 1fr auto;
+        padding: 0 14px;
+      }
+      .masthead-left { display: none; }
+      .logo { text-align: left; font-size: 1.45rem; }
+      .masthead-date { display: none; }
+      .nav-tabs-inner {
+        padding: 0 10px;
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+      }
+      .nav-tab { flex: 0 0 auto; }
+      .statsbar { padding: 8px 14px; }
+      .statsbar-inner {
+        gap: 10px;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+      }
+      .statsbar-refresh { margin-left: 0; }
+      .container { padding: 20px 14px 42px; }
+      .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+    }
+    @media (max-width: 560px) {
+      .page-header-text h2 { font-size: 1.5rem; }
+      .whale-header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .insider-badge {
+        align-items: flex-start;
+        flex-direction: row;
+        gap: 8px;
+      }
+      .whale-stats { gap: 10px; }
+      .trade-action-row {
+        flex-wrap: wrap;
+      }
+      .trade-prob {
+        margin-left: 0;
+      }
+      .section-rule {
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+    }
+    @media (min-width: 700px) and (max-width: 820px) {
+      .container { padding: 22px 20px 46px; }
+      .whale-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+      .page-header-text h2 { font-size: 1.72rem; }
+    }
+    @media (max-width: 430px) {
+      .nav-tabs-inner { padding: 0 8px; }
+      .nav-tab {
+        padding: 9px 12px;
+        font-size: .66rem;
+        gap: 5px;
+      }
+      .statsbar { padding: 7px 10px; }
+      .stat { font-size: .67rem; }
+      .container { padding: 18px 12px calc(40px + env(safe-area-inset-bottom)); }
+      .page-header {
+        margin-bottom: 18px;
+        padding: 18px 0 12px;
+      }
+      .page-header-text h2 { font-size: 1.34rem; }
+      .page-header-text p {
+        font-size: .78rem;
+        line-height: 1.5;
+      }
+      .whale-header { padding: 12px 12px 8px; }
+      .whale-stats { padding: 0 12px 10px; gap: 8px; }
+      .whale-stat { font-size: .66rem; }
+      .featured-trade { padding: 10px 12px; }
+      .trade-size { font-size: 1rem; }
+      .trade-market {
+        font-size: .78rem;
+        line-height: 1.35;
+      }
+      .trade-meta { font-size: .64rem; }
+      .insider-score-num { font-size: 1.25rem; }
+      .section-label { font-size: .78rem; }
+    }
+    @media (max-width: 390px) {
+      .logo { font-size: 1.3rem; }
+      .live-pill {
+        padding: 3px 8px;
+        font-size: .6rem;
+      }
+      .nav-tab {
+        padding: 8px 10px;
+        font-size: .63rem;
+      }
+      .whale-address {
+        font-size: .68rem;
+        overflow-wrap: anywhere;
+      }
+      .whale-name {
+        display: block;
+        margin: 2px 0 0;
+      }
+      .polymarket-link { font-size: .61rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Masthead ───────────────────────────────────────────────────────────── -->
+<div class="masthead">
+  <div class="masthead-top">
+    <div class="masthead-left">
+      <span class="edition-label">Market Sentinel</span>
+      <span class="masthead-tagline">Prediction market intelligence</span>
+    </div>
+    <a href="/" class="logo">Market <em>Sentinel</em></a>
+    <div class="masthead-right">
+      <div class="masthead-date" id="masthead-date"></div>
+      <div class="live-pill">
+        <span class="live-dot" id="live-dot"></span>
+        <span id="live-text">LIVE</span>
+      </div>
+    </div>
+  </div>
+  <div class="masthead-rules"></div>
+</div>
+
+<!-- ── Nav tabs ───────────────────────────────────────────────────────────── -->
+<div class="nav-tabs">
+  <div class="nav-tabs-inner">
+    <a href="/" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+        <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+      </svg>
+      Markets
+    </a>
+    <a href="/whales" class="nav-tab active">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <path d="M22 12c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2s10 4.477 10 10z"/>
+        <path d="M8 14s1.5 2 4 2 4-2 4-2"/>
+        <line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
+      </svg>
+      Whales
+    </a>
+    <a href="/resolved" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+        <polyline points="22 4 12 14.01 9 11.01"/>
+      </svg>
+      Resolved
+    </a>
+    <a href="/outlook" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      Outlook
+    </a>
+    <a href="/eval" class="nav-tab">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <line x1="4" y1="19" x2="4" y2="5"/><line x1="10" y1="19" x2="10" y2="11"/><line x1="16" y1="19" x2="16" y2="8"/><line x1="22" y1="19" x2="22" y2="13"/>
+      </svg>
+      Eval
+    </a>
+  </div>
+</div>
+
+<!-- ── Stats bar ──────────────────────────────────────────────────────────── -->
+<div class="statsbar">
+  <div class="statsbar-inner">
+    <span class="stat">Whales tracked: <strong id="stat-whales">—</strong></span>
+    <span class="stat">Volume found: <strong id="stat-volume">—</strong></span>
+    <span class="stat">Top insider score: <strong id="stat-top-score">—</strong></span>
+    <span class="statsbar-refresh" id="last-refresh">Fetching whale data…</span>
+  </div>
+</div>
+
+<!-- ── Main content ────────────────────────────────────────────────────────── -->
+<div class="container">
+
+  <div class="page-header">
+    <div class="page-header-text">
+      <h2>Whale Intelligence</h2>
+      <p>Large-position traders on Polymarket · Polymarket on-chain data via public API</p>
+    </div>
+    <span class="page-header-badge" id="claude-badge">Loading…</span>
+  </div>
+
+  <!-- Skeleton while loading -->
+  <div id="loading-state">
+    <div class="skeleton-grid">
+      <div class="skeleton-card">
+        <div class="skel" style="height:18px;width:60%;margin-bottom:12px"></div>
+        <div class="skel" style="height:12px;width:40%;margin-bottom:20px"></div>
+        <div class="skel" style="height:60px;margin-bottom:12px"></div>
+        <div class="skel" style="height:12px;width:80%;margin-bottom:8px"></div>
+        <div class="skel" style="height:12px;width:70%;margin-bottom:8px"></div>
+        <div class="skel" style="height:12px;width:75%"></div>
+      </div>
+      <div class="skeleton-card">
+        <div class="skel" style="height:18px;width:55%;margin-bottom:12px"></div>
+        <div class="skel" style="height:12px;width:45%;margin-bottom:20px"></div>
+        <div class="skel" style="height:60px;margin-bottom:12px"></div>
+        <div class="skel" style="height:12px;width:85%;margin-bottom:8px"></div>
+        <div class="skel" style="height:12px;width:65%;margin-bottom:8px"></div>
+        <div class="skel" style="height:12px;width:70%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Whale grid (populated by JS) -->
+  <div id="whale-grid" class="whale-grid" style="display:none"></div>
+
+  <!-- Empty state -->
+  <div id="empty-state" class="state-msg" style="display:none">
+    <strong>No whale activity detected</strong>
+    No trades above $5,000 found on recently alerted markets.<br>
+    The sentinel is scanning — check back in a few minutes.
+  </div>
+
+  <!-- Error state -->
+  <div id="error-state" class="state-msg" style="display:none">
+    <strong>Could not load whale data</strong>
+    The Polymarket API may be temporarily unavailable. Retrying…
+  </div>
+
+  <div class="footer-note" id="footer-note" style="display:none">
+    Data sourced directly from <a href="https://polymarket.com" target="_blank" rel="noopener">Polymarket</a>'s
+    public on-chain trade history via the
+    <a href="https://data-api.polymarket.com" target="_blank" rel="noopener">Data API</a>.
+    Insider scores are algorithmic signals, not investment advice.
+    Refresh rate: every 5 minutes.
+  </div>
+
+</div><!-- /container -->
+
+<script>
+/* ─── Utilities ────────────────────────────────────────────────────────────── */
+const fmt$ = n => n >= 1e6 ? `$${(n/1e6).toFixed(2)}M`
+                : n >= 1e3 ? `$${(n/1e3).toFixed(1)}K`
+                : `$${n.toFixed(0)}`;
+
+const fmtDate = ts => {
+  const d = new Date(ts);
+  return d.toLocaleString('en-US', {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+};
+
+/* Draw a tiny sparkline SVG */
+function drawSparkline(container, points) {
+  if (!points || points.length < 2) {
+    container.style.display = 'none';
+    return;
+  }
+  const W = 260, H = 36, pad = 2;
+  const mn = Math.min(...points), mx = Math.max(...points);
+  const range = mx - mn || 1;
+  const xs = points.map((_, i) => pad + (i / (points.length - 1)) * (W - 2 * pad));
+  const ys = points.map(v => H - pad - ((v - mn) / range) * (H - 2 * pad));
+  const path = xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+  const delta = points[points.length - 1] - points[0];
+  const stroke = delta >= 0 ? '#1E6B2E' : '#B01C1C';
+  container.innerHTML = `
+    <svg class="sparkline-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <path d="${path}" fill="none" stroke="${stroke}" stroke-width="1.5" stroke-linejoin="round"/>
+    </svg>`;
+}
+
+/* ─── Card renderer ────────────────────────────────────────────────────────── */
+function renderCard(w) {
+  const ft       = w.featured_trade;
+  const score    = w.insider_score;
+  const scoreCol = w.score_color;
+  const sideClass = ft.side === 'BUY' ? 'buy' : 'sell';
+
+  // Prob delta (we don't have "at trade" prob, so just show current)
+  const probPct = ft.implied_prob.toFixed(1);
+
+  // Polymarket profile link
+  const profileUrl = `https://polymarket.com/profile/${w.address}`;
+  const txUrl = ft.tx_hash
+    ? `https://polygonscan.com/tx/${ft.tx_hash}`
+    : null;
+
+  // Signal tags HTML
+  const tagHtml = w.insider_signals.map(s =>
+    `<span class="signal-tag">${escHtml(s)}</span>`
+  ).join('');
+
+  const card = document.createElement('div');
+  card.className = 'whale-card';
+  card.style.setProperty('--stripe-color', scoreCol);
+
+  card.innerHTML = `
+    <div class="whale-card-stripe"></div>
+
+    <div class="whale-header">
+      <div class="whale-identity">
+        <div>
+          <span class="whale-address">${escHtml(w.short_address)}</span>
+          ${w.pseudonym ? `<span class="whale-name">· ${escHtml(w.pseudonym)}</span>` : ''}
+        </div>
+        <a class="polymarket-link" href="${profileUrl}" target="_blank" rel="noopener">
+          View on Polymarket ↗
+        </a>
+      </div>
+      <div class="insider-badge">
+        <span class="insider-score-num" style="--badge-color:${scoreCol}">${score.toFixed(0)}</span>
+        <span class="insider-score-label" style="--badge-color:${scoreCol}">${escHtml(w.score_label)}</span>
+        <span class="insider-score-sub">INSIDER SCORE</span>
+      </div>
+    </div>
+
+    <div class="whale-stats">
+      <span class="whale-stat">Volume: <strong>${fmt$(w.total_volume)}</strong></span>
+      <span class="whale-stat">Trades: <strong>${w.total_trades.toLocaleString()}</strong></span>
+      <span class="whale-stat">Markets: <strong>${w.unique_markets}</strong></span>
+      ${w.first_seen ? `<span class="whale-stat">Active since: <strong>${fmtDate(w.first_seen)}</strong></span>` : ''}
+    </div>
+
+    <div class="featured-trade">
+      <div class="trade-action-row">
+        <span class="trade-side ${sideClass}">${escHtml(ft.side)}</span>
+        <span class="trade-size">${fmt$(ft.usd_value)}</span>
+        <span class="trade-prob">${escHtml(ft.outcome)} · ${probPct}% implied</span>
+      </div>
+      <div class="trade-market">"${escHtml(ft.market_name)}"</div>
+      <div class="trade-meta">
+        <span>${escHtml(ft.relative_time)}</span>
+        <span>Polymarket</span>
+        ${txUrl ? `<a href="${txUrl}" target="_blank" rel="noopener">View tx ↗</a>` : ''}
+      </div>
+    </div>
+
+    ${renderProbBar(ft.implied_prob)}
+
+    <div class="sparkline-wrap" id="spark-${w.address.replace(/[^a-z0-9]/gi,'')}" style="display:block"></div>
+
+    <div class="whale-brief">
+      <div class="brief-section">
+        <div class="brief-label">The Wallet</div>
+        <p class="brief-text">${escHtml(w.wallet_para)}</p>
+      </div>
+      <div class="brief-section">
+        <div class="brief-label">The Trade</div>
+        <p class="brief-text">${escHtml(w.trade_para)}</p>
+      </div>
+      <div class="brief-section">
+        <div class="brief-label">The Angle</div>
+        <p class="brief-text">${escHtml(w.angle_para)}</p>
+      </div>
+    </div>
+
+    ${tagHtml ? `<div class="signal-tags">${tagHtml}</div>` : ''}
+  `;
+
+  return card;
+}
+
+function renderProbBar(impliedProb) {
+  const pct = Math.round(impliedProb);
+  const fill = Math.min(100, Math.max(0, pct));
+  return `
+    <div class="prob-bar-wrap">
+      <span class="prob-label">Implied prob</span>
+      <div class="prob-bar"><div class="prob-fill" style="width:${fill}%"></div></div>
+      <span class="prob-value">${pct}%</span>
+    </div>`;
+}
+
+function escHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/* ─── Data loading ─────────────────────────────────────────────────────────── */
+let lastFetch = null;
+
+async function fetchWhales() {
+  try {
+    const res = await fetch('/api/whales?limit=10');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    lastFetch = new Date();
+    render(data);
+    updateLiveDot(true);
+    document.getElementById('last-refresh').textContent =
+      `Last updated: ${lastFetch.toLocaleTimeString()}`;
+  } catch (err) {
+    console.error('Whale fetch error:', err);
+    updateLiveDot(false);
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('error-state').style.display = 'block';
+    document.getElementById('last-refresh').textContent = 'Fetch failed — retrying…';
+  }
+}
+
+function render(data) {
+  const grid    = document.getElementById('whale-grid');
+  const loading = document.getElementById('loading-state');
+  const empty   = document.getElementById('empty-state');
+  const errEl   = document.getElementById('error-state');
+  const footer  = document.getElementById('footer-note');
+  const stories = data.stories || [];
+
+  loading.style.display = 'none';
+  errEl.style.display   = 'none';
+
+  // Stats bar
+  const totalVol = stories.reduce((s, w) => s + (w.total_volume || 0), 0);
+  const topScore = stories.length ? Math.max(...stories.map(w => w.insider_score)) : 0;
+  document.getElementById('stat-whales').textContent     = stories.length;
+  document.getElementById('stat-volume').textContent     = fmt$(totalVol);
+  document.getElementById('stat-top-score').textContent  = topScore.toFixed(0) + '/100';
+
+  // Claude badge
+  const badge = document.getElementById('claude-badge');
+  badge.textContent = data.claude_active ? 'Claude Active' : 'Template Mode';
+  badge.style.color = data.claude_active ? '#1E6B2E' : '#7A5C38';
+
+  if (stories.length === 0) {
+    grid.style.display  = 'none';
+    empty.style.display = 'block';
+    footer.style.display = 'none';
+    return;
+  }
+
+  grid.style.display   = 'grid';
+  empty.style.display  = 'none';
+  footer.style.display = 'block';
+
+  // Clear + re-render cards
+  grid.innerHTML = '';
+  stories.forEach(w => {
+    const card = renderCard(w);
+    grid.appendChild(card);
+
+    // Draw sparkline after card is in DOM
+    const sparkId = `spark-${w.address.replace(/[^a-z0-9]/gi,'')}`;
+    const sparkEl = document.getElementById(sparkId);
+    if (sparkEl) drawSparkline(sparkEl, w.sparkline);
+  });
+}
+
+function updateLiveDot(alive) {
+  const dot  = document.getElementById('live-dot');
+  const text = document.getElementById('live-text');
+  if (alive) {
+    dot.classList.remove('stale');
+    text.textContent = 'LIVE';
+  } else {
+    dot.classList.add('stale');
+    text.textContent = 'STALE';
+  }
+}
+
+/* ─── Masthead date ─────────────────────────────────────────────────────────── */
+function updateMastheadDate() {
+  const el = document.getElementById('masthead-date');
+  if (!el) return;
+  const now = new Date();
+  el.innerHTML = now.toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  });
+}
+
+/* ─── Boot ──────────────────────────────────────────────────────────────────── */
+updateMastheadDate();
+fetchWhales();
+
+// Refresh every 5 minutes (whale cache TTL matches)
+setInterval(fetchWhales, 5 * 60 * 1000);
+</script>
+</body>
+</html>

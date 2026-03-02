@@ -1,0 +1,2303 @@
+"""
+Story Generator — converts raw signal data into readable news stories.
+
+Transforms alert_history rows and market_snapshot movers into structured
+Story objects the dashboard renders as a real-time publication feed.
+
+Two layers on top of raw data:
+  1. Clustering  — groups related markets (e.g. "deport 250k / 500k / 750k")
+                   into a single story card with a probability ladder.
+  2. Claude prose — rewrites template headlines/ledes with actual journalism
+                    for the top-scoring stories. Falls back gracefully if no
+                    API key is set.
+"""
+
+import json
+import os
+import re
+import hashlib
+import logging
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Dict, Any, Union
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Asset implications: keyword → watch-worthy instruments
+# ---------------------------------------------------------------------------
+ASSET_MAP: Dict[str, List[str]] = {
+    "ukraine":         ["Brent Crude", "Natural Gas", "RTX", "LMT", "EUR/USD"],
+    "russia":          ["Brent Crude", "Natural Gas", "USD/RUB"],
+    "china":           ["FXI", "KWEB", "TSM", "SOXX", "USD/CNH"],
+    "taiwan":          ["TSM", "SOXX", "QQQ", "Defense ETFs"],
+    "iran":            ["Brent Crude", "GLD", "RTX", "LMT"],
+    "israel":          ["GLD", "Brent Crude", "Defense stocks"],
+    "gaza":            ["GLD", "Brent Crude"],
+    "korea":           ["EWY", "SOXX", "Defense ETFs"],
+    "nato":            ["RTX", "LMT", "NOC"],
+    "india":           ["INDA", "USD/INR"],
+    "japan":           ["EWJ", "USD/JPY"],
+    "europe":          ["EZU", "EUR/USD"],
+    "trump":           ["DXY", "BTC", "MXN short", "Tariff plays"],
+    "election":        ["VIX", "Sector rotation"],
+    "tariff":          ["FXI", "Industrials", "DXY"],
+    "sanction":        ["USD strength", "Commodities"],
+    "impeach":         ["VIX", "USD"],
+    "fed":             ["2yr UST", "XLF", "QQQ", "GLD"],
+    "federal reserve": ["2yr UST", "XLF", "QQQ", "GLD"],
+    "interest rate":   ["TLT", "XLF", "QQQ", "2yr UST"],
+    "inflation":       ["TIPS", "GLD", "XLE", "2yr UST"],
+    "recession":       ["GLD", "TLT", "VIX", "XLU"],
+    "gdp":             ["SPY", "EEM", "DXY"],
+    "oil":             ["XOM", "CVX", "XLE", "Brent Crude"],
+    "gold":            ["GLD", "GDX", "Silver"],
+    "dollar":          ["DXY", "EUR/USD", "EEM"],
+    "bitcoin":         ["MSTR", "COIN", "ETH-USD"],
+    "crypto":          ["BTC-USD", "ETH-USD", "COIN"],
+    "ethereum":        ["ETH-USD", "COIN"],
+    "ai":              ["NVDA", "MSFT", "GOOGL", "AMD"],
+    "nvidia":          ["NVDA", "AMD", "SOXX"],
+    "openai":          ["MSFT", "NVDA"],
+    "anthropic":       ["AMZN", "GOOGL"],
+    "semiconductor":   ["SOXX", "TSM", "NVDA", "AMD"],
+    "chip":            ["SOXX", "TSM", "NVDA"],
+    "sec":             ["Crypto markets", "FinTech"],
+    "antitrust":       ["GOOGL", "META", "AMZN", "MSFT"],
+    "war":             ["GLD", "Brent Crude", "Defense stocks", "VIX"],
+    "military":        ["RTX", "LMT", "NOC", "BA"],
+    "nuclear":         ["CCJ", "URA", "Defense stocks"],
+    "ceasefire":       ["Brent Crude", "Defense stocks", "EUR/USD"],
+    "missile":         ["GLD", "Defense stocks", "Brent Crude"],
+    "invasion":        ["GLD", "Brent Crude", "Defense stocks"],
+    "ipo":             ["Renaissance IPO ETF", "Sector peers"],
+    "merger":          ["Merger arb plays"],
+    "acquisition":     ["Merger arb plays", "Sector ETFs"],
+    "private equity":  ["BX", "KKR", "APO"],
+    "venture":         ["ARKK", "Sector ETFs"],
+    "startup":         ["ARKK", "Growth ETFs"],
+    "spac":            ["IPOX", "Sector ETFs"],
+}
+
+CATEGORY_MAP = {
+    # ── Sports: detected first, always excluded from the feed ──────────
+    "SPORTS": [
+        "premier league", "la liga", "serie a", "bundesliga", "champions league",
+        "europa league", "fa cup", "mls", "ligue 1", "eredivisie",
+        "super bowl", "nfl", "nba", "mlb", "nhl", "nba finals",
+        "world cup", "olympics", "formula 1", " f1 ", "grand prix",
+        "wimbledon", "us open", "french open", "australian open",
+        # European clubs
+        "barcelona", "real madrid", "manchester city", "manchester united",
+        "liverpool", "arsenal", "chelsea", "tottenham", "atletico",
+        "athletic bilbao", "mallorca", "sevilla", "villarreal", "valencia",
+        "juventus", "inter milan", "ac milan", "roma", "napoli", "lazio",
+        "bayern munich", "borussia", "dortmund", "leipzig", "leverkusen",
+        "paris saint", "psg", "marseille", "lyon", "monaco",
+        "ajax", "psv", "porto", "benfica", "celtic", "rangers",
+        # US franchises
+        "lakers", "celtics", "warriors", "bulls", "knicks", "nets",
+        "cowboys", "patriots", "chiefs", "eagles", "49ers", "ravens",
+        "yankees", "dodgers", "red sox", "cubs", "astros", "braves",
+        # Generic sports terms
+        "league title", "league championship", "league winner",
+        "win the league", "win the cup", "win the championship",
+        "golden boot", "ballon d'or", "mvp award", "playoff bracket",
+        "point spread", "over/under", "betting line",
+        # Golf
+        "masters tournament", "pga tour", "ryder cup", "open championship",
+        "golf tournament", "golfer", "win the masters", "win the open",
+        "schauffele", "mcilroy", "spieth", "woods", "koepka", "thomas",
+        "detry", "fitzpatrick", "finau", "mccarthy", "day", "rahm",
+        # Tennis / combat sports / other
+        "ufc ", " ufc", "bellator", "boxing match", "title fight",
+        "wimbledon", "roland garros",
+        # Generic individual sport matchup patterns
+        "win the title", "win the trophy",
+    ],
+
+    # ── Politics: domestic policy, law, governance, social issues ──────
+    "POLITICS": [
+        # Institutions & process
+        "election", "president", "congress", "senate", "house", "vote",
+        "democrat", "republican", "governor", "primary", "nominee",
+        "cabinet", "impeach", "impeachment", "legislation", "poll",
+        "approval", "executive order", "veto", "filibuster", "shutdown",
+        "debt ceiling", "budget", "appropriation", "confirm", "confirmation",
+        "ratify", "midterm", "ballot", "caucus", "electoral", "swing state",
+        # People
+        "trump", "biden", "harris", "desantis", "pence", "pelosi",
+        "schumer", "mcconnell", "romney", "newsom", "abbott", "aoc",
+        "ocasio", "rubio", "cruz", "sanders", "warren", "buttigieg",
+        # Legal / criminal justice
+        "sentence", "sentencing", "sentenced", "prison", "convicted",
+        "conviction", "guilty", "verdict", "acquit", "acquittal",
+        "trial", "court", "judge", "jury", "indicted", "indictment",
+        "arrested", "arrest", "charged", "charges", "criminal", "crime",
+        "justice", "lawsuit", "sue", "appeal", "parole", "bail", "plea",
+        "testify", "testimony", "prosecutor", "subpoena", "contempt",
+        "pardon", "commute", "clemency", "extradite", "extradition",
+        "weinstein", "epstein", "ftx", "bankman",
+        # Immigration
+        "deport", "deportation", "immigration", "border", "migrant",
+        "refugee", "asylum", "visa", "citizen", "citizenship",
+        "undocumented", "daca", "ice agents", "customs",
+        # Social policy
+        "abortion", "reproductive", "roe", "planned parenthood",
+        "lgbtq", "transgender", "gender", "same-sex", "marriage",
+        "marijuana", "cannabis", "gun control", "firearm", "second amendment",
+        # Law enforcement / intelligence
+        "police", "fbi", "cia", "nsa", "doj", "department of justice",
+        "attorney general", "investigation", "probe", "scandal",
+        # Governance
+        "resign", "resignation", "recall", "referendum", "term limit",
+        "supreme court", "appeals court", "circuit court", "ruling",
+    ],
+
+    # ── Geopolitics: international relations, foreign policy ───────────
+    "GEOPOLITICS": [
+        # Major powers
+        "china", "russia", "ukraine", "taiwan", "nato", "european union",
+        "iran", "israel", "palestine", "gaza", "west bank", "hezbollah",
+        "hamas", "korea", "north korea", "south korea", "japan", "india",
+        # More countries
+        "uk", "britain", "france", "germany", "brazil", "mexico",
+        "pakistan", "saudi", "turkey", "poland", "italy", "spain",
+        "australia", "canada", "venezuela", "cuba", "nicaragua",
+        "afghanistan", "iraq", "syria", "lebanon", "libya", "sudan",
+        "ethiopia", "nigeria", "myanmar", "indonesia", "philippines",
+        "egypt", "algeria", "morocco", "kenya", "south africa",
+        # Institutions
+        "un security council", "un general assembly", "nato summit",
+        "g7", "g20", "imf", "world bank", "wto", "opec", "asean",
+        "brics", "iaea", "icc", "interpol",
+        # Concepts
+        "sanctions", "treaty", "diplomacy", "summit", "ambassador",
+        "annexation", "annex", "sovereignty", "territorial",
+        "export control", "embargo", "blockade", "occupation",
+        "independence", "separatist", "secession", "alliance", "accord",
+        "bilateral", "multilateral", "foreign policy", "geopolitical",
+        # World leaders & key figures
+        "netanyahu", "zelensky", "zelenskyy", "putin", "xi jinping",
+        "modi", "macron", "scholz", "sunak", "starmer", "trudeau",
+        "erdogan", "orban", "kim jong", "ayatollah", "khamenei",
+        "pahlavi", "reza pahlavi", "maduro", "zelensky", "lula",
+        "meloni", "mbs", "bin salman", "salman",
+        # Iran-specific (high-volume markets right now)
+        "iranian", "iranian regime", "supreme leader", "irgc",
+        "revolutionary guard", "strait of hormuz", "hormuz",
+        "nuclear deal", "jcpoa", "persian gulf",
+        # Gulf region
+        "gulf state", "uae", "dubai", "qatar", "bahrain", "kuwait",
+        "riyadh", "doha", "abu dhabi",
+        # Other active geopolitical themes
+        "regime change", "regime fall", "regime collapse",
+        "coup attempt", "civil war", "territorial", "occupied",
+        "normalization", "abraham accords", "two-state",
+    ],
+
+    # ── Conflict: armed conflict, security, military operations ────────
+    "CONFLICT": [
+        "war", "military", "invasion", "conflict", "attack", "missile",
+        "nuclear", "troops", "army", "navy", "air force", "marines",
+        "defense", "weapons", "ceasefire", "peace deal", "peace talks",
+        "casualties", "drone", "strike", "airstrike", "air strike",
+        "bombing", "bomb", "explosion", "siege", "hostage",
+        "prisoner of war", "pow", "offensive", "frontline", "artillery",
+        "warship", "submarine", "fighter jet", "carrier group",
+        "regiment", "battalion", "combat", "soldier", "veteran",
+        "civilian casualty", "refugee crisis", "ethnic cleansing",
+        "coup", "uprising", "insurgency", "terrorism", "isis", "houthi",
+        "wagner", "special operation", "special forces", "pentagon",
+        "department of defense", "dod",
+        # Active conflict themes
+        "nuclear strike", "ballistic missile", "hypersonic",
+        "carrier group", "naval blockade", "amphibious",
+        "ground offensive", "air campaign", "no-fly zone",
+        "irgc", "revolutionary guard", "proxy war",
+        "us strike", "air strike iran", "strike iran",
+    ],
+
+    # ── Technology: AI, crypto, biotech, space, cyber ─────────────────
+    "TECHNOLOGY": [
+        # AI / ML
+        "ai", "artificial intelligence", "openai", "anthropic", "gpt",
+        "llm", "agi", "machine learning", "deepmind", "gemini",
+        "claude", "chatgpt", "copilot", "neural", "foundation model",
+        # Hardware / chips
+        "semiconductor", "chip", "nvidia", "tsmc", "amd", "intel",
+        "arm holdings", "asml", "fab", "foundry",
+        # Big Tech
+        "apple", "google", "meta", "amazon", "microsoft", "tesla",
+        "alphabet", "spacex", "palantir",
+        # Crypto / blockchain
+        "crypto", "bitcoin", "ethereum", "solana", "cardano",
+        "blockchain", "defi", "nft", "stablecoin", "cbdc",
+        "coinbase", "binance",
+        # Emerging tech
+        "robot", "robotics", "automation", "autonomous", "self-driving",
+        "quantum", "5g", "6g", "satellite", "nasa", "space",
+        # Biotech / health tech
+        "biotech", "pharmaceutical", "fda", "drug approval",
+        "clinical trial", "gene", "genome", "crispr", "mrna",
+        # Cyber
+        "cybersecurity", "cyber attack", "hack", "breach", "ransomware",
+        "data breach",
+        # Regulation
+        "tech regulation", "antitrust", "sec", "ftc",
+    ],
+
+    # ── Markets: economics, finance, macro, commodities ────────────────
+    "MARKETS": [
+        # Monetary policy
+        "fed", "federal reserve", "interest rate", "rate cut", "rate hike",
+        "basis point", "quantitative easing", "quantitative tightening",
+        "fomc", "jerome powell", "yellen", "fed chair", "fed nominee",
+        "shelton", "judy shelton", "fed governor",
+        # Macro indicators
+        "inflation", "cpi", "ppi", "gdp", "recession", "unemployment",
+        "payroll", "jobs report", "wage", "retail sales", "pmi",
+        "consumer confidence", "housing", "manufacturing",
+        # Markets
+        "stock market", "s&p", "nasdaq", "dow", "russell",
+        "treasury", "bond", "yield", "yield curve", "10-year",
+        "vix", "volatility",
+        # Assets
+        "oil", "crude", "brent", "wti", "natural gas", "commodity",
+        "gold", "silver", "copper", "iron ore",
+        "dollar", "dxy", "currency", "forex", "exchange rate",
+        "euro", "yen", "yuan", "pound",
+        # Fiscal / revenue
+        "revenue", "tax", "taxes", "tariff", "trade war", "trade deal",
+        "import", "export", "collect", "collection", "customs duty",
+        "deficit", "debt", "spending", "budget", "fiscal",
+        "debt ceiling", "appropriation",
+        # Corporate
+        "ipo", "spac", "merger", "acquisition", "m&a", "buyout",
+        "private equity", "venture capital", "unicorn", "valuation",
+        "earnings", "profit", "revenue miss", "guidance",
+        "bankruptcy", "default", "restructure",
+        # Sectors
+        "bank", "banking", "fintech", "insurance", "real estate",
+        "energy sector", "renewable energy", "utilities",
+        "economy", "economic",
+    ],
+}
+
+CATEGORY_COLORS = {
+    "POLITICS":    "#5C4A9B",
+    "GEOPOLITICS": "#1A5276",
+    "CONFLICT":    "#922B21",
+    "TECHNOLOGY":  "#1A7A4A",
+    "MARKETS":     "#784212",
+    "SPORTS":      "#2E7D32",   # green — never shown, just for detection
+    "OTHER":       "#5D6D7E",
+}
+
+# Words that don't carry topic meaning — stripped before clustering
+STOP_WORDS = frozenset([
+    'a', 'an', 'the', 'is', 'are', 'will', 'would', 'could', 'should',
+    'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'but', 'by',
+    'from', 'with', 'be', 'been', 'have', 'has', 'had', 'was', 'were',
+    'this', 'that', 'which', 'who', 'what', 'when', 'where', 'if', 'than',
+    'as', 'do', 'does', 'did', 'how', 'why', 'not', 'no', 'into',
+    'more', 'most', 'least', 'between', 'before', 'after', 'during',
+    'over', 'under', 'about', 'up', 'out', 'it', 'its', 'get', 'got',
+])
+_DIGIT = re.compile(r'\d')
+
+
+def _content_words(text: str) -> frozenset:
+    """Extract meaningful content words from a market name."""
+    words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+    return frozenset(
+        w for w in words
+        if w not in STOP_WORDS and not _DIGIT.search(w) and len(w) > 2
+    )
+
+
+def _word_similarity(w1: frozenset, w2: frozenset) -> float:
+    if not w1 or not w2:
+        return 0.0
+    return len(w1 & w2) / min(len(w1), len(w2))
+
+
+# ---------------------------------------------------------------------------
+# Story dataclass
+# ---------------------------------------------------------------------------
+@dataclass
+class Story:
+    story_id: str
+    market_id: str
+    headline: str
+    lede: str
+    market_name: str
+    platform: str
+    probability: float
+    old_probability: Optional[float]
+    prob_change: Optional[float]
+    direction: str
+    signal_score: float
+    signals: List[str]
+    signal_types: List[str]
+    category: str
+    timestamp: datetime
+    urgency: str
+    watch_assets: List[str]
+    volume_24h: Optional[float]
+    is_radar: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "id":              self.story_id,
+            "headline":        self.headline,
+            "lede":            self.lede,
+            "market_id":       self.market_id,
+            "market_name":     self.market_name,
+            "platform":        self.platform,
+            "probability":     round(self.probability, 1),
+            "old_probability": round(self.old_probability, 1) if self.old_probability is not None else None,
+            "prob_change":     round(self.prob_change, 1) if self.prob_change is not None else None,
+            "direction":       self.direction,
+            "signal_score":    round(self.signal_score, 1),
+            "signals":         self.signals,
+            "signal_types":    self.signal_types,
+            "category":        self.category,
+            "category_color":  CATEGORY_COLORS.get(self.category, CATEGORY_COLORS["OTHER"]),
+            "timestamp":       self.timestamp.isoformat(),
+            "relative_time":   self._relative_time(),
+            "urgency":         self.urgency,
+            "watch_assets":    self.watch_assets,
+            "volume_24h":      self.volume_24h,
+            "is_radar":        self.is_radar,
+            "is_cluster":      False,
+        }
+
+    def _relative_time(self) -> str:
+        now = datetime.now(timezone.utc)
+        ts = self.timestamp.replace(tzinfo=timezone.utc) if self.timestamp.tzinfo is None else self.timestamp
+        secs = max(0, int((now - ts).total_seconds()))
+        if secs < 60:   return "just now"
+        if secs < 3600: return f"{secs // 60}m ago"
+        if secs < 86400: return f"{secs // 3600}h ago"
+        return f"{secs // 86400}d ago"
+
+
+# ---------------------------------------------------------------------------
+# StoryCluster — a group of related markets rendered as one card
+# ---------------------------------------------------------------------------
+@dataclass
+class StoryCluster:
+    """Multiple prediction markets on the same topic, shown as one story card."""
+    stories: List[Story]  # sorted by probability descending
+    headline: str = ""
+    lede: str = ""
+
+    @property
+    def story_id(self) -> str:
+        return f"cluster-{self.stories[0].story_id}"
+
+    @property
+    def signal_score(self) -> float:
+        return max(s.signal_score for s in self.stories)
+
+    @property
+    def category(self) -> str:
+        return self.stories[0].category
+
+    @property
+    def urgency(self) -> str:
+        order = {"breaking": 2, "developing": 1, "watch": 0}
+        return max(self.stories, key=lambda s: order.get(s.urgency, 0)).urgency
+
+    @property
+    def timestamp(self) -> datetime:
+        return self.stories[0].timestamp
+
+    @property
+    def watch_assets(self) -> List[str]:
+        return self.stories[0].watch_assets
+
+    @property
+    def platform(self) -> str:
+        return self.stories[0].platform
+
+    @property
+    def auto_headline(self) -> str:
+        """Generate a cluster-level headline without Claude."""
+        names   = [s.market_name for s in self.stories]
+        topic   = _extract_topic(names)
+        top     = self.stories[0]
+        variant = _title_case(self._variant_label(top.market_name))  # already correct
+        p_str   = f"{top.probability:.0f}%"
+        if top.prob_change is not None and abs(top.prob_change) > 0.5:
+            mag  = abs(top.prob_change)
+            word = "Rising" if top.prob_change > 0 else "Falling"
+            return f"{topic}: {p_str} on {variant} — {word} {mag:.1f}pp"
+        return f"{topic}: {p_str} on {variant}"
+
+    @property
+    def auto_lede(self) -> str:
+        """Generate a cluster-level lede without Claude."""
+        names  = [s.market_name for s in self.stories]
+        topic  = _extract_topic(names)
+        top    = self.stories[0]
+        plat   = top.platform.title()
+        n      = len(self.stories)
+        p_str  = f"{top.probability:.0f}%"
+
+        top_label = self._variant_label(top.market_name)
+
+        if n >= 3:
+            second    = self.stories[1]
+            sec_label = self._variant_label(second.market_name)
+            intro = (
+                f"{plat} has priced {n} discrete outcomes for {topic}. "
+                f"The \u201c{top_label}\u201d scenario leads at {p_str}, "
+                f"followed by \u201c{sec_label}\u201d at {second.probability:.0f}%."
+            )
+        else:
+            second    = self.stories[1]
+            sec_label = self._variant_label(second.market_name)
+            intro = (
+                f"{plat} is pricing two outcomes for {topic}: "
+                f"\u201c{top_label}\u201d leads at {p_str} "
+                f"vs \u201c{sec_label}\u201d at {second.probability:.0f}%."
+            )
+
+        # Add movement context
+        max_change = max((abs(s.prob_change or 0) for s in self.stories), default=0)
+        if max_change > 0.5:
+            mover    = max(self.stories, key=lambda s: abs(s.prob_change or 0))
+            mv_label = self._variant_label(mover.market_name)
+            word     = "gained" if (mover.prob_change or 0) > 0 else "shed"
+            move_ctx = (
+                f" The \u201c{mv_label}\u201d line {word} "
+                f"{abs(mover.prob_change or 0):.1f}pp in the latest session."
+            )
+        else:
+            move_ctx = ""
+
+        return intro + move_ctx
+
+    def to_dict(self) -> dict:
+        members = []
+        for s in self.stories:
+            label = self._variant_label(s.market_name)
+            members.append({
+                "label":        label,
+                "market_name":  s.market_name,
+                "probability":  round(s.probability, 1),
+                "old_probability": round(s.old_probability, 1) if s.old_probability is not None else None,
+                "prob_change":  round(s.prob_change, 1) if s.prob_change is not None else None,
+                "direction":    s.direction,
+                "signal_score": round(s.signal_score, 1),
+                "platform":     s.platform,
+            })
+
+        rep = self.stories[0]
+        return {
+            "id":              self.story_id,
+            "is_cluster":      True,
+            "cluster_count":   len(self.stories),
+            "cluster_markets": members,
+            "headline":        self.headline or self.auto_headline,
+            "lede":            self.lede or self.auto_lede,
+            "category":        self.category,
+            "category_color":  CATEGORY_COLORS.get(self.category, CATEGORY_COLORS["OTHER"]),
+            "urgency":         self.urgency,
+            "timestamp":       self.timestamp.isoformat(),
+            "relative_time":   rep._relative_time(),
+            "signal_score":    round(self.signal_score, 1),
+            "watch_assets":    self.watch_assets,
+            "platform":        self.platform,
+            "is_radar":        False,
+            # top-market probability fields for JS compatibility
+            "probability":     round(rep.probability, 1),
+            "market_id":       rep.market_id,
+            "old_probability": round(rep.old_probability, 1) if rep.old_probability is not None else None,
+            "prob_change":     round(rep.prob_change, 1) if rep.prob_change is not None else None,
+            "direction":       rep.direction,
+            "signals":         rep.signals,
+            "signal_types":    rep.signal_types,
+        }
+
+    def _variant_label(self, market_name: str) -> str:
+        """Strip common prefix/suffix to show only the distinguishing part."""
+        names = [s.market_name for s in self.stories]
+        if len(names) <= 1:
+            return market_name[:60]
+
+        # Find common prefix character by character
+        common_prefix = os.path.commonprefix([n.lower() for n in names])
+        # Walk back to word boundary
+        if common_prefix and not common_prefix[-1].isalnum():
+            pass
+        else:
+            common_prefix = common_prefix[:max(0, common_prefix.rfind(' '))]
+
+        # Find common suffix
+        rev_names = [n.lower()[::-1] for n in names]
+        common_suffix = os.path.commonprefix(rev_names)[::-1]
+        if common_suffix and not common_suffix[0].isalnum():
+            pass
+        else:
+            idx = common_suffix.find(' ')
+            common_suffix = common_suffix[idx:] if idx >= 0 else ""
+
+        start = len(common_prefix)
+        end   = len(market_name) - len(common_suffix)
+
+        if start < end:
+            variant = market_name[start:end].strip(" ,?-—–")
+            if len(variant) > 2:
+                return variant
+
+        # Fallback: first 50 chars
+        return market_name[:50]
+
+
+# ---------------------------------------------------------------------------
+# Claude headline generator
+# ---------------------------------------------------------------------------
+class ClaudeHeadlineGenerator:
+    """
+    Calls claude-haiku to write real headlines and ledes for top stories.
+    Caches by (truncated market name + probability bucket) so we don't
+    re-call Claude on every 30-second dashboard refresh.
+    Falls back silently to template text if no key is configured.
+    """
+
+    SYSTEM = (
+        "You are the editor-in-chief of Market Sentinel — a financial intelligence terminal "
+        "for sophisticated investors, traders, and geopolitical analysts. "
+        "Your core mandate: BE AHEAD OF THE NEWS, not behind it. "
+        "Prediction markets price in information before traditional media. "
+        "Your job is to surface WHAT IS HAPPENING and WHAT IT MEANS FOR MARKETS — "
+        "not to explain market mechanics. "
+        "Coverage pillars: geopolitics & conflict, US/global politics, emerging technology "
+        "(AI, semiconductors, biotech), public markets (equities, rates, macro), "
+        "and private markets (funding rounds, IPOs, M&A). "
+        "When a market has settled (near 0% or 100%), explain the underlying EVENT that caused "
+        "resolution and immediately pivot to forward-looking signals: what live markets are "
+        "now in play, what investors should watch. "
+        "Tone: authoritative, precise, zero fluff. Think Geopolitical Futures meets Bloomberg."
+    )
+
+    def __init__(self, api_key: str):
+        import anthropic as _anthropic
+        self._client = _anthropic.Anthropic(api_key=api_key)
+        self._cache: Dict[str, Dict[str, str]] = {}
+
+    def _cache_key(self, name: str, prob: float) -> str:
+        bucket = round(prob / 5) * 5  # snap to nearest 5pp
+        raw = f"{name[:40]}|{bucket}"
+        return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+    def enhance_story(self, story: Story) -> Dict[str, str]:
+        key = self._cache_key(story.market_name, story.probability)
+        if key in self._cache:
+            return self._cache[key]
+
+        result = self._call(
+            market=story.market_name,
+            platform=story.platform,
+            prob=story.probability,
+            old_prob=story.old_probability,
+            change=story.prob_change,
+            signals=story.signals[:3],
+            score=story.signal_score,
+        )
+        self._cache[key] = result
+        return result
+
+    def enhance_cluster(self, cluster: StoryCluster) -> Dict[str, str]:
+        names = [s.market_name for s in cluster.stories]
+        key = hashlib.md5("|".join(sorted(n[:20] for n in names)).encode()).hexdigest()[:12]
+        if key in self._cache:
+            return self._cache[key]
+
+        # Describe the cluster
+        ladder = "\n".join(
+            f'  - "{s.market_name}" → {s.probability:.0f}% ({"+" if (s.prob_change or 0) >= 0 else ""}{(s.prob_change or 0):.1f}pp)'
+            for s in cluster.stories
+        )
+        prompt = (
+            f"These {len(names)} prediction markets are all about the same underlying topic:\n\n"
+            f"{ladder}\n\n"
+            f"Category: {cluster.category}\n"
+            f"Signal score: {cluster.signal_score:.0f}/100\n\n"
+            f"Write a single headline and opening paragraph that captures the shared narrative "
+            f"across all these markets — what is the key question the market is debating, "
+            f"and what does the probability distribution tell us?\n\n"
+            f"Return only valid JSON: {{\"headline\": \"...\", \"lede\": \"...\"}}"
+        )
+        result = self._call_raw(prompt)
+        self._cache[key] = result
+        return result
+
+    def _call(self, market, platform, prob, old_prob, change, signals, score) -> Dict[str, str]:
+        direction = "risen" if (change or 0) > 0 else "fallen"
+        change_str = f"{abs(change):.1f}pp" if change is not None else "notably"
+        old_str = f"{old_prob:.0f}%" if old_prob is not None else "previously"
+        is_settled = prob >= 97.0 or prob <= 3.0
+
+        if is_settled:
+            outcome = "YES" if prob >= 97.0 else "NO"
+            prompt = (
+                f"Prediction market RESOLVED:\n\n"
+                f'Market: "{market}"\n'
+                f"Platform: {platform.title()}\n"
+                f"Final probability: {prob:.0f}% ({outcome})\n\n"
+                f"This market has settled. Write a headline and lede that:\n"
+                f"1. Lead with the actual real-world EVENT that caused this market to resolve "
+                f"(use your knowledge of recent news — do not mention 'market settled' or "
+                f"'technical artifact').\n"
+                f"2. Immediately pivot to what investors and analysts should watch NEXT — "
+                f"what live questions remain open, what other markets or assets are in play.\n"
+                f"Headline: max 85 chars, declarative statement about what happened.\n"
+                f"Lede: 2 sentences, forward-looking, actionable.\n\n"
+                f"Return only valid JSON: {{\"headline\": \"...\", \"lede\": \"...\"}}"
+            )
+        else:
+            prompt = (
+                f"Prediction market MOVING — early signal detected:\n\n"
+                f'Market: "{market}"\n'
+                f"Platform: {platform.title()}\n"
+                f"Probability: {old_str} → {prob:.0f}% (has {direction} {change_str})\n"
+                f"Signal triggers: {'; '.join(signals)}\n"
+                f"Signal strength: {score:.0f}/100\n\n"
+                f"Write a headline (max 85 chars, present tense, active voice) "
+                f"and a 2-sentence lede. Lead with what is ACTUALLY HAPPENING in the world "
+                f"that is driving this move — not market mechanics. "
+                f"Be specific. Do not start the lede with 'The market'.\n\n"
+                f"Return only valid JSON: {{\"headline\": \"...\", \"lede\": \"...\"}}"
+            )
+        return self._call_raw(prompt)
+
+    def analyze_context(
+        self,
+        market_name: str,
+        prob: float,
+        change: Optional[float],
+        platform: str,
+        signals: List[str],
+        news_articles: List[Dict],
+    ) -> Dict[str, str]:
+        """
+        Generate an Intelligence Note for the drawer panel.
+        Incorporates cached news headlines if available; falls back to
+        Claude's trained knowledge if not. Cached per market+prob bucket.
+        """
+        key = self._cache_key(f"ctx:{market_name}", prob)
+        if key in self._cache:
+            return self._cache[key]
+
+        # Build the news block
+        news_block = ""
+        if news_articles:
+            lines = [
+                f'  - "{a["title"]}" ({a.get("source","").replace("rss.","").replace("feeds.","")}, '
+                f'{(a.get("published_at") or "")[:16]})'
+                for a in news_articles[:5]
+            ]
+            news_block = "\n\nRelated news (last 48h):\n" + "\n".join(lines)
+
+        change_str = ""
+        if change is not None:
+            word = "risen" if change > 0 else "fallen"
+            change_str = f", has {word} {abs(change):.1f}pp in the last session"
+
+        signals_str = ""
+        clean_sigs = [s for s in (signals or []) if s and "below alert" not in s.lower()]
+        if clean_sigs:
+            signals_str = f"\nDetected signals: {'; '.join(clean_sigs[:3])}"
+
+        is_settled = prob >= 97.0 or prob <= 3.0
+
+        if is_settled:
+            outcome_word = "resolved YES" if prob >= 97.0 else "resolved NO"
+            prompt = (
+                f'Prediction market "{market_name}" has {outcome_word} at {prob:.0f}%.\n'
+                f"Platform: {platform.title()}"
+                f"{signals_str}"
+                f"{news_block}\n\n"
+                f"Write a 3-sentence Intelligence Note for a sophisticated investor:\n"
+                f"• Sentence 1: State the REAL-WORLD EVENT that caused this market to resolve "
+                f"(use your knowledge of recent events — do NOT say 'the market settled' or "
+                f"'this is a technical artifact'; tell the reader WHAT HAPPENED).\n"
+                f"• Sentence 2: Explain the immediate implications — for regional stability, "
+                f"financial markets, or geopolitics, whichever is most relevant.\n"
+                f"• Sentence 3: Name the most important LIVE question that remains open for "
+                f"investors — what active market or asset should they be watching right now.\n\n"
+                f"Return only valid JSON: {{\"analysis\": \"...\"}}\n"
+                f"Tone: authoritative, news-first, forward-looking. No market mechanics jargon."
+            )
+        else:
+            prompt = (
+                f'Prediction market: "{market_name}"\n'
+                f"Platform: {platform.title()}\n"
+                f"Current probability: {prob:.0f}%{change_str}"
+                f"{signals_str}"
+                f"{news_block}\n\n"
+                f"Write a 3-sentence Intelligence Note for a sophisticated investor:\n"
+                f"• Sentence 1: What real-world development is driving this market right now "
+                f"(cite specific news if relevant; otherwise use your best informed analysis — "
+                f"never say 'the market is moving' without explaining WHY).\n"
+                f"• Sentence 2: What this probability level implies about near-term outcomes "
+                f"and which assets or sectors are most exposed.\n"
+                f"• Sentence 3: The single most important catalyst or data point to monitor next.\n\n"
+                f"Return only valid JSON: {{\"analysis\": \"...\"}}\n"
+                f"Tone: senior geopolitical/financial analyst. Precise, direct, zero fluff."
+            )
+
+        result = self._call_raw(prompt)
+        self._cache[key] = result
+        return result
+
+    def _call_raw(self, prompt: str) -> Dict[str, str]:
+        try:
+            msg = self._client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=300,
+                system=self.SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = msg.content[0].text.strip()
+            # Strip markdown code fences if present
+            text = re.sub(r'^```(?:json)?\s*', '', text)
+            text = re.sub(r'\s*```$', '', text)
+            return json.loads(text)
+        except Exception as e:
+            logger.debug(f"Claude generation failed: {e}")
+            return {}
+
+
+# ---------------------------------------------------------------------------
+# StoryGenerator
+# ---------------------------------------------------------------------------
+class StoryGenerator:
+    """
+    Converts DB rows into Story / StoryCluster objects for the dashboard.
+
+    Pass an api_key to enable Claude-powered headlines for top stories.
+    Gracefully falls back to templates if key is absent or calls fail.
+    """
+
+    CLUSTER_THRESHOLD = 0.55   # word overlap ratio to group stories
+    CLAUDE_TOP_N      = 6      # enrich this many top stories with Claude
+    CLAUDE_TIMEOUT    = 10     # seconds to wait for parallel Claude calls
+
+    def __init__(self, api_key: str = ""):
+        self._claude: Optional[ClaudeHeadlineGenerator] = None
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        if key:
+            try:
+                self._claude = ClaudeHeadlineGenerator(key)
+                logger.info("Claude headline generation enabled (haiku)")
+            except Exception as e:
+                logger.warning(f"Claude init failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def generate_stories(self, db, hours: int = 24, limit: int = 40) -> List[Union[Story, StoryCluster]]:
+        rows = db.get_recent_alerts_feed(hours=hours, limit=limit)
+        raw  = [s for s in (self._row_to_story(r) for r in rows) if s]
+
+        # Drop sports — they slip through the sentinel filter occasionally
+        raw = [s for s in raw if s.category != "SPORTS"]
+
+        # Mark and heavily penalize settled markets (prob ≥97% or ≤3%).
+        # They are resolved events, not early signals. They stay in the feed
+        # for context but rank far below live-moving markets.
+        for s in raw:
+            if s.probability >= 97.0 or s.probability <= 3.0:
+                s.signal_score = s.signal_score * 0.25  # 75% penalty
+
+        # Deduplicate by market_name — keep highest-scored story per market
+        seen: Dict[str, Story] = {}
+        for s in raw:
+            if s.market_name not in seen or s.signal_score > seen[s.market_name].signal_score:
+                seen[s.market_name] = s
+        raw = list(seen.values())
+
+        clustered = self._cluster(raw)
+        if self._claude:
+            clustered = self._enrich_with_claude(clustered)
+
+        return clustered
+
+    def generate_radar(self, db, hours: int = 24, limit: int = 20) -> List[Story]:
+        # Primary: markets with actual price movement
+        mover_rows = db.get_recent_movers(hours=hours, min_change=1.0, limit=limit)
+
+        # Secondary: top-volume markets (shows Iran/Fed/AI even with no delta yet)
+        volume_rows = db.get_top_volume_markets(limit=40, hours=2)
+
+        # Merge — deduplicate by market_id, movers take priority
+        seen_ids = {r["market_id"] for r in mover_rows}
+        combined = list(mover_rows)
+        for r in volume_rows:
+            if r["market_id"] not in seen_ids:
+                seen_ids.add(r["market_id"])
+                combined.append(r)
+
+        # Convert to stories, drop sports and settled markets
+        stories = [s for s in (self._mover_to_story(r) for r in combined) if s]
+        stories = [s for s in stories if s.category != "SPORTS"]
+        stories = [s for s in stories if 3.0 < s.probability < 97.0]  # live markets only
+
+        # Keep only editorially relevant categories — radar is not a general prediction market index
+        RADAR_CATEGORIES = {"GEOPOLITICS", "CONFLICT", "POLITICS", "MARKETS", "TECHNOLOGY", "OTHER"}
+        stories = [s for s in stories if s.category in RADAR_CATEGORIES]
+
+        stories.sort(key=lambda s: s.volume_24h, reverse=True)
+        return stories[:limit]
+
+    def generate_resolved_context(self, db, limit: int = 6) -> List[Dict]:
+        """
+        Generate "Resolved Context" cards for the dedicated tab.
+
+        Each card covers a recently settled high-volume market:
+          - Claude explains WHAT HAPPENED (the real-world event)
+          - Lists related LIVE markets the reader should watch next
+          - Flags key assets/sectors exposed
+
+        Returns a list of dicts ready for JSON serialization.
+        """
+        rows = db.get_resolved_context_markets(limit=limit * 2)
+        if not rows:
+            return []
+
+        # Filter to editorial pillars — no sports, no entertainment
+        SPORTS_SKIP = CATEGORY_MAP.get("SPORTS", [])
+        def is_relevant(name: str) -> bool:
+            nl = name.lower()
+            return not any(kw in nl for kw in SPORTS_SKIP)
+
+        rows = [r for r in rows if is_relevant(r["market_name"])][:limit]
+
+        # Pull the live radar for related-market surfacing
+        live_radar = db.get_top_volume_markets(limit=60, hours=2)
+        live_markets = [
+            r for r in live_radar
+            if 3.0 < r.get("latest_prob", 50) < 97.0
+        ]
+
+        cards = []
+        for row in rows:
+            market_name = row["market_name"]
+            prob        = row["probability"]
+            volume_24h  = row.get("volume_24h", 0) or 0
+            platform    = row.get("platform", "polymarket")
+
+            # Find live descendant markets (same topic keywords)
+            topic_words = set(_content_words(market_name))
+            related = []
+            for lm in live_markets:
+                lm_words = set(_content_words(lm["market_name"]))
+                if len(topic_words & lm_words) >= 2 and lm["market_name"] != market_name:
+                    related.append(lm)
+                if len(related) >= 4:
+                    break
+
+            # Build asset implications
+            name_lower = market_name.lower()
+            assets = []
+            for kw, asset_list in ASSET_MAP.items():
+                if kw in name_lower:
+                    assets.extend(asset_list)
+            assets = list(dict.fromkeys(assets))[:4]  # dedup, cap at 4
+
+            # Claude generates the event explanation + forward look
+            outcome   = "YES" if prob >= 97.0 else "NO"
+            category  = _detect_category(market_name)
+
+            if self._claude:
+                related_str = ""
+                if related:
+                    related_str = "\nActive related markets:\n" + "\n".join(
+                        f'  - "{r["market_name"]}" → {r["latest_prob"]:.0f}%  (${r["volume_24h"]:,.0f}/day)'
+                        for r in related
+                    )
+
+                prompt = (
+                    f'Prediction market RESOLVED {outcome}: "{market_name}"\n'
+                    f"Platform: {platform.title()}\n"
+                    f"Final probability: {prob:.0f}%\n"
+                    f"24h volume: ${volume_24h:,.0f}"
+                    f"{related_str}\n\n"
+                    f"Write a Resolved Context brief for sophisticated investors:\n"
+                    f"1. headline: Declarative statement of what actually happened in the world "
+                    f"(not 'market resolved' — tell us the real event, 85 chars max).\n"
+                    f"2. event_summary: 2 sentences. What happened, when, and why it matters "
+                    f"geopolitically or financially. Be specific — name people, places, numbers.\n"
+                    f"3. forward_look: 2 sentences. What live questions remain open. What "
+                    f"investors should watch next. Reference the related markets if provided.\n\n"
+                    f"Return only valid JSON: "
+                    f'{{\"headline\": \"...\", \"event_summary\": \"...\", \"forward_look\": \"...\"}}'
+                )
+                enrichment = self._claude._call_raw(prompt)
+            else:
+                enrichment = {}
+
+            cards.append({
+                "market_name": market_name,
+                "platform":    platform,
+                "probability": prob,
+                "outcome":     outcome,
+                "volume_24h":  volume_24h,
+                "category":    category,
+                "headline":    enrichment.get("headline", market_name),
+                "event_summary": enrichment.get("event_summary", ""),
+                "forward_look":  enrichment.get("forward_look", ""),
+                "related_live":  [
+                    {
+                        "market_name": r["market_name"],
+                        "probability": r.get("latest_prob", 0),
+                        "volume_24h":  r.get("volume_24h", 0),
+                    }
+                    for r in related
+                ],
+                "assets": assets,
+            })
+
+        return cards
+
+    # ------------------------------------------------------------------
+    # Clustering
+    # ------------------------------------------------------------------
+
+    def _cluster(self, stories: List[Story]) -> List[Union[Story, StoryCluster]]:
+        """
+        Group stories about the same underlying topic into StoryCluster objects.
+        Uses greedy word-overlap matching — fast enough for < 100 stories.
+        """
+        fingerprints = [_content_words(s.market_name) for s in stories]
+        assigned = [-1] * len(stories)
+        clusters: List[List[int]] = []
+
+        for i, story in enumerate(stories):
+            best_cluster = -1
+            best_sim = self.CLUSTER_THRESHOLD
+
+            for c_idx, members in enumerate(clusters):
+                rep = fingerprints[members[0]]
+                sim = _word_similarity(fingerprints[i], rep)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_cluster = c_idx
+
+            if best_cluster >= 0:
+                clusters[best_cluster].append(i)
+                assigned[i] = best_cluster
+            else:
+                assigned[i] = len(clusters)
+                clusters.append([i])
+
+        result: List[Union[Story, StoryCluster]] = []
+        for members in clusters:
+            if len(members) == 1:
+                result.append(stories[members[0]])
+            else:
+                cluster_stories = [stories[m] for m in members]
+                # Sort cluster members by probability descending (most likely first)
+                cluster_stories.sort(key=lambda s: s.probability, reverse=True)
+                result.append(StoryCluster(stories=cluster_stories))
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Claude enrichment
+    # ------------------------------------------------------------------
+
+    def _enrich_with_claude(
+        self,
+        items: List[Union[Story, StoryCluster]],
+    ) -> List[Union[Story, StoryCluster]]:
+        """
+        Enrich the top-N highest-scoring items with Claude-generated prose.
+        Runs in parallel; falls back to template on timeout or error.
+        """
+        top = sorted(items, key=lambda x: x.signal_score, reverse=True)[:self.CLAUDE_TOP_N]
+
+        def enrich(item):
+            if isinstance(item, StoryCluster):
+                return item, self._claude.enhance_cluster(item)
+            else:
+                return item, self._claude.enhance_story(item)
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.CLAUDE_TOP_N) as pool:
+                futures = {pool.submit(enrich, item): item for item in top}
+                for future in as_completed(futures, timeout=self.CLAUDE_TIMEOUT):
+                    item, enhanced = future.result()
+                    if enhanced.get("headline"):
+                        item.headline = enhanced["headline"]
+                    if enhanced.get("lede"):
+                        item.lede = enhanced["lede"]
+        except (TimeoutError, Exception) as e:
+            logger.debug(f"Claude enrichment partial/failed: {e}")
+
+        return items
+
+    # ------------------------------------------------------------------
+    # Row → Story conversion
+    # ------------------------------------------------------------------
+
+    def _row_to_story(self, row: dict) -> Optional[Story]:
+        try:
+            name     = row["market_name"]
+            score    = float(row["signal_score"])
+            old_prob = row.get("old_probability")
+            new_prob = float(row.get("new_probability") or 50.0)
+            reasons  = json.loads(row["reasons"]) if row.get("reasons") else []
+            signal_types = json.loads(row.get("signal_types") or "[]")
+            if not isinstance(signal_types, list):
+                signal_types = []
+            ts       = datetime.fromisoformat(row["timestamp"])
+
+            change    = (new_prob - old_prob) if old_prob is not None else None
+            direction = _direction(change)
+            category  = _detect_category(name)
+
+            headline = _make_headline(name, new_prob, change, direction, reasons)
+            lede     = _make_lede(name, row["platform"], old_prob, new_prob, change, reasons, score)
+
+            return Story(
+                story_id=f"alert-{row['id']}",
+                market_id=row.get("market_id", ""),
+                headline=headline,
+                lede=lede,
+                market_name=name,
+                platform=row["platform"],
+                probability=new_prob,
+                old_probability=old_prob,
+                prob_change=change,
+                direction=direction,
+                signal_score=score,
+                signals=reasons,
+                signal_types=[str(s) for s in signal_types],
+                category=category,
+                timestamp=ts,
+                urgency=_urgency(score, ts),
+                watch_assets=_watch_assets(name),
+                volume_24h=None,
+                is_radar=False,
+            )
+        except Exception as e:
+            logger.debug(f"Row parse error: {e}")
+            return None
+
+    def _mover_to_story(self, row: dict) -> Optional[Story]:
+        try:
+            name   = row["market_name"]
+            latest = float(row["latest_prob"])
+            oldest = float(row["oldest_prob"])
+            change = float(row["change"])
+            ts     = datetime.fromisoformat(row["latest_ts"])
+
+            direction    = _direction(change)
+            direction_w  = "Rising" if change > 0 else "Falling"
+            category     = _detect_category(name)
+            score        = min(38.0, abs(change) * 3.5)
+
+            # Build radar headline — full clean title, probability at end
+            q_bare  = re.sub(r'\?$', '', _short_name(name)).strip()
+            headline = f"{q_bare} — Odds {direction_w} {abs(change):.1f}pp to {latest:.0f}%"
+
+            return Story(
+                story_id=f"radar-{row['platform']}-{row['market_id']}",
+                market_id=row.get("market_id", ""),
+                headline=headline,
+                lede=(
+                    f"\u201c{name}\u201d has moved {abs(change):.1f}pp "
+                    f"({oldest:.0f}% \u2192 {latest:.0f}%) in the past few hours on "
+                    f"{row['platform'].title()} — below alert threshold but showing "
+                    f"early momentum worth watching."
+                ),
+                market_name=name,
+                platform=row["platform"],
+                probability=latest,
+                old_probability=oldest,
+                prob_change=change,
+                direction=direction,
+                signal_score=score,
+                signals=["Price moving — below alert threshold"],
+                signal_types=["radar_momentum"],
+                category=category,
+                timestamp=ts,
+                urgency="watch",
+                watch_assets=_watch_assets(name),
+                volume_24h=row.get("volume_24h"),
+                is_radar=True,
+            )
+        except Exception as e:
+            logger.debug(f"Mover parse error: {e}")
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Pure helper functions (no class state needed)
+# ---------------------------------------------------------------------------
+
+# Words kept lowercase in title case (unless first word)
+_LOWER_WORDS = frozenset([
+    'a', 'an', 'the', 'and', 'but', 'or', 'nor',
+    'in', 'on', 'at', 'to', 'for', 'of', 'by', 'with',
+    'vs', 'via', 'per', 'as',
+])
+
+
+def _title_case(text: str) -> str:
+    """
+    Smart title case:
+    - Preserves dotted acronyms like U.S., U.K., E.U. (all-caps with dots)
+    - Preserves plain acronyms like NATO, GDP, IPO
+    - Keeps articles/prepositions lowercase after the first word
+    """
+    words = text.split()
+    out = []
+    for i, w in enumerate(words):
+        # Already ALL-CAPS and more than one char → keep (NATO, GDP)
+        if w.isupper() and len(w) > 1:
+            out.append(w)
+        # Dotted acronym like u.s. → U.S.
+        elif re.match(r'^([a-zA-Z]\.){2,}$', w):
+            out.append(w.upper())
+        elif i == 0 or w.lower() not in _LOWER_WORDS:
+            out.append(w[0].upper() + w[1:] if w else w)
+        else:
+            out.append(w.lower())
+    return ' '.join(out)
+
+
+def _short_name(name: str) -> str:
+    """
+    Return a clean, title-cased version of the market name for use in headlines.
+    Keeps the 'Will…?' framing intact — reads naturally as a question headline.
+    """
+    name = name.strip()
+    name = name[:80] + '…' if len(name) > 80 else name
+    return _title_case(name)
+
+
+# Auxiliary/copulative verbs — stop the subject-phrase extraction here
+_VERB_STOP = re.compile(
+    r'\s+(be|is|are|was|were|become|have|has|had|get|remain|stay)\b',
+    re.IGNORECASE
+)
+
+# Action verb → noun-form substitution for cleaner topic labels
+_VERB_TO_NOUN: Dict[str, str] = {
+    'deport':    'Deportation',
+    'collect':   'Collection',
+    'win':       'Race',
+    'elect':     'Election',
+    'resign':    'Resignation',
+    'impeach':   'Impeachment',
+    'invade':    'Invasion',
+    'attack':    'Attack',
+    'sign':      'Signing',
+    'pass':      'Passage',
+    'acquire':   'Acquisition',
+    'merge':     'Merger',
+    'launch':    'Launch',
+    'announce':  'Announcement',
+    'approve':   'Approval',
+    'reject':    'Rejection',
+    'ban':       'Ban',
+    'convict':   'Conviction',
+    'sentence':  'Sentencing',
+    'indict':    'Indictment',
+    'arrest':    'Arrest',
+    'nominate':  'Nomination',
+    'appoint':   'Appointment',
+    'raise':     'Rate Hike',
+    'cut':       'Rate Cut',
+}
+
+
+def _extract_topic(names: List[str]) -> str:
+    """
+    Extract a concise topic label from a list of related market names.
+
+    Strategy:
+      1. Use the common prefix (stripped of leading "will" etc.).
+         Stop at auxiliary/copulative verbs so we get the subject noun phrase,
+         not the full predicate (e.g. "Harvey Weinstein" not "Harvey Weinstein be sentenced to").
+      2. If the prefix is too short (<= 5 chars), try the common suffix
+         (e.g. "2026 Texas Republican Primary" from two candidates' markets).
+      3. Fall back to the first name, trimmed.
+    """
+    if not names:
+        return "This Market"
+
+    lowered = [n.lower() for n in names]
+
+    # ── 1. Common prefix ────────────────────────────────────────────
+    common = os.path.commonprefix(lowered)
+    # Walk back to word boundary
+    if common and common[-1] not in (' ', '?'):
+        last_space = common.rfind(' ')
+        common = common[:last_space] if last_space > 0 else ""
+    common = common.strip()
+
+    # Strip leading question starters
+    topic = re.sub(
+        r'^(will|who will|what will|when will|does|is|are|can|has|have)\s+',
+        '', common, flags=re.IGNORECASE
+    ).strip()
+
+    # Stop at auxiliary/copulative verbs → keep only the subject phrase
+    m = _VERB_STOP.search(topic)
+    if m:
+        topic = topic[:m.start()].strip()
+
+    # Nominalize a trailing action verb (e.g. "trump deport" → "trump deportation")
+    t_words = topic.split()
+    if t_words and t_words[-1].lower() in _VERB_TO_NOUN:
+        t_words[-1] = _VERB_TO_NOUN[t_words[-1].lower()]
+        topic = ' '.join(t_words)
+
+    # Strip leading article "The" / "A" when topic has more content
+    topic = re.sub(r'^(the|a)\s+', '', topic, flags=re.IGNORECASE).strip()
+
+    if len(topic) > 5:
+        return _title_case(topic)
+
+    # ── 2. Common suffix ────────────────────────────────────────────
+    rev_lowered = [n.lower()[::-1] for n in names]
+    rev_common  = os.path.commonprefix(rev_lowered)[::-1].strip(' ?')
+    # Walk forward to word boundary
+    if rev_common and rev_common[0] not in (' ', '?'):
+        first_space = rev_common.find(' ')
+        rev_common = rev_common[first_space:].strip() if first_space >= 0 else ""
+
+    # Strip trailing question marks and "in 20XX" year suffixes
+    suffix_topic = re.sub(r'\s+in\s+\d{4}$', '', rev_common.strip(' ?')).strip()
+    # Strip leading prepositions/verbs from suffix topic
+    suffix_topic = re.sub(r'^(the|a|an|in|at|for|of|on)\s+', '', suffix_topic, flags=re.IGNORECASE).strip()
+    # Nominalize a leading verb in the suffix too
+    s_words = suffix_topic.split()
+    if s_words and s_words[0].lower() in _VERB_TO_NOUN:
+        s_words[0] = _VERB_TO_NOUN[s_words[0].lower()]
+        suffix_topic = ' '.join(s_words)
+
+    if len(suffix_topic) > 5:
+        return _title_case(suffix_topic)
+
+    # ── 3. Fallback: first market name, stripped ────────────────────
+    fb = re.sub(r'^(will|who will|what will|when will|does|is|are|can)\s+',
+                '', names[0], flags=re.IGNORECASE)
+    fb = re.sub(r'\?$', '', fb).strip()
+    m2 = _VERB_STOP.search(fb.lower())
+    if m2:
+        fb = fb[:m2.start()].strip()
+    return _title_case(fb[:40])
+
+
+def _direction(change: Optional[float]) -> str:
+    if change is None: return "flat"
+    if change >  0.5:  return "up"
+    if change < -0.5:  return "down"
+    return "flat"
+
+
+def _urgency(score: float, ts: datetime) -> str:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_mins = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+    if score >= 60 and age_mins < 45:  return "breaking"
+    if score >= 40 or age_mins < 120:  return "developing"
+    return "watch"
+
+
+def _detect_category(name: str) -> str:
+    name_lower = name.lower()
+
+    # SPORTS always wins — these get filtered out of the feed entirely
+    if any(kw in name_lower for kw in CATEGORY_MAP["SPORTS"]):
+        return "SPORTS"
+
+    scores = {
+        cat: sum(1 for kw in kws if kw in name_lower)
+        for cat, kws in CATEGORY_MAP.items()
+        if cat != "SPORTS"
+    }
+    best = max(scores, key=lambda c: scores[c])
+    return best if scores[best] > 0 else "OTHER"
+
+
+def _watch_assets(name: str, max_assets: int = 5) -> List[str]:
+    name_lower = name.lower()
+    tally: Dict[str, int] = {}
+    for kw, assets in ASSET_MAP.items():
+        if kw in name_lower:
+            for a in assets:
+                tally[a] = tally.get(a, 0) + 1
+    return sorted(tally, key=lambda a: -tally[a])[:max_assets]
+
+
+def _make_headline(name: str, prob: float, change: Optional[float],
+                   direction: str, reasons: List[str]) -> str:
+    """
+    Produce a short, journalistic headline that:
+    - Keeps the market question in recognisable form (title-cased)
+    - Includes the current probability
+    - Describes the signal type with active-voice verbs
+    """
+    q       = _short_name(name)          # full title-cased question
+    q_bare  = re.sub(r'\?$', '', q).strip()   # without trailing ?
+    p_str   = f"{prob:.0f}%"
+    primary = reasons[0].lower() if reasons else ""
+
+    # ── Signal-specific patterns ──────────────────────────────────────
+    if "whale" in primary or "smart money" in primary:
+        return f"Smart Money Alert: {q_bare[:65]}"
+
+    if "gap" in primary or "leading" in primary or "divergen" in primary:
+        return f"Cross-Platform Divergence: {q_bare[:60]}"
+
+    if "off-peak" in primary or "unusual hour" in primary:
+        return f"Off-Hours Move: {q_bare[:60]} at {p_str}"
+
+    if "thin market" in primary or "thin liquid" in primary:
+        chg_str = f"{abs(change):.1f}pp " if change is not None else ""
+        word = "Spike" if direction == "up" else "Drop"
+        return f"Thin-Market {word}: {q_bare[:55]} — {chg_str}to {p_str}"
+
+    # ── Directional move ─────────────────────────────────────────────
+    if change is not None and abs(change) > 0.4:
+        mag = abs(change)
+        if direction == "up":
+            verb = "Surges" if mag >= 10 else "Jumps" if mag >= 5 else "Rises"
+        else:
+            verb = "Plunges" if mag >= 10 else "Falls" if mag >= 5 else "Slips"
+
+        if "accelerat" in primary:
+            verb = "Accelerates " + ("Higher" if direction == "up" else "Lower")
+            return f"{q_bare[:55]} {verb} — Now at {p_str}"
+
+        return f"{q_bare[:55]} — Odds {verb} {mag:.1f}pp to {p_str}"
+
+    # ── Flat / generic signal ─────────────────────────────────────────
+    if "accelerat" in primary:
+        word = "Building" if direction == "up" else "Fading"
+        return f"{q_bare[:60]}: Momentum {word} at {p_str}"
+
+    return f"{q_bare[:62]}: Market Signal at {p_str}"
+
+
+def _make_cluster_headline(stories: List["Story"], topic: str) -> str:
+    """
+    Headline for a cluster card — describes the whole probability distribution.
+    E.g. "Trump Deportation: 93% on 250K–500K Range — Falling 0.1pp"
+    """
+    if not stories:
+        return topic
+
+    top = stories[0]   # highest probability (sorted desc)
+
+    # Build variant label: strip "Will / does / etc." AND common topic words
+    top_raw   = re.sub(r'\?$', '', top.market_name).strip()
+    top_clean = re.sub(
+        r'^(will|who will|what will|when will|does|is|are|can|has|have)\s+',
+        '', top_raw, flags=re.IGNORECASE
+    ).strip().lower()
+
+    # Remove words from the topic label one by one from the start of top_clean
+    for word in topic.lower().split():
+        top_clean = re.sub(
+            r'^\s*' + re.escape(word) + r'\s+', '', top_clean, flags=re.IGNORECASE
+        ).strip()
+
+    variant = _title_case(top_clean.strip(" ,?-—–")) if len(top_clean.strip()) > 2 else top_raw[:50]
+    p_str   = f"{top.probability:.0f}%"
+
+    # Add movement context if significant
+    if top.prob_change is not None and abs(top.prob_change) > 0.5:
+        mag  = abs(top.prob_change)
+        word = "Rising" if top.prob_change > 0 else "Falling"
+        return f"{topic}: {p_str} on {variant} — {word} {mag:.1f}pp"
+
+    return f"{topic}: {p_str} on {variant}"
+
+
+def _make_lede(name: str, platform: str, old_prob: Optional[float],
+               new_prob: float, change: Optional[float],
+               reasons: List[str], score: float) -> str:
+    """
+    Two-sentence lede written in the style of a financial intelligence brief.
+    Sentence 1: what moved and by how much.
+    Sentence 2: what signals triggered / what it means.
+    """
+    plat = platform.title()
+    parts: List[str] = []
+
+    # ── Sentence 1: the move ─────────────────────────────────────────
+    if old_prob is not None and change is not None and abs(change) > 0.3:
+        if change > 0:
+            verb  = "surged" if abs(change) >= 5 else "climbed"
+            arrow = f"{old_prob:.0f}% → {new_prob:.0f}%"
+            parts.append(
+                f'Odds on \u201c{name}\u201d {verb} from {old_prob:.0f}% to '
+                f'{new_prob:.0f}% on {plat}, a {abs(change):.1f}-point move.'
+            )
+        else:
+            verb  = "plunged" if abs(change) >= 5 else "slipped"
+            parts.append(
+                f'Odds on \u201c{name}\u201d {verb} from {old_prob:.0f}% to '
+                f'{new_prob:.0f}% on {plat}, shedding {abs(change):.1f} points.'
+            )
+    else:
+        parts.append(
+            f'The {plat} market on \u201c{name}\u201d is showing an '
+            f'unusual signal at {new_prob:.0f}%.'
+        )
+
+    # ── Sentence 2: signal context ────────────────────────────────────
+    if "whale" in ' '.join(reasons).lower() or "smart money" in ' '.join(reasons).lower():
+        parts.append("Large-wallet activity has been detected, suggesting informed positioning.")
+    elif "gap" in ' '.join(reasons).lower() or "divergen" in ' '.join(reasons).lower():
+        parts.append("Polymarket and Kalshi are pricing this event differently — a potential arbitrage or information gap.")
+    elif "accelerat" in ' '.join(reasons).lower():
+        word = "upside" if change is not None and change > 0 else "downside"
+        parts.append(f"The move is accelerating, with {word} momentum strengthening across multiple time frames.")
+    elif "off-peak" in ' '.join(reasons).lower() or "unusual hour" in ' '.join(reasons).lower():
+        parts.append("The activity is occurring outside normal trading hours, which can indicate informed pre-positioning.")
+    elif len(reasons) >= 2:
+        r1, r2 = reasons[0].lower().rstrip('.'), reasons[1].lower().rstrip('.')
+        parts.append(f"Two independent signals corroborate the move: {r1} and {r2}.")
+    elif reasons:
+        parts.append(f"Trigger: {reasons[0].lower().rstrip('.')}.")
+
+    if score >= 70:
+        parts.append("High signal strength — warrants immediate attention.")
+
+    return ' '.join(parts)
+
+
+# ---------------------------------------------------------------------------
+# OutlookGenerator — multi-asset price prediction dashboard
+# ---------------------------------------------------------------------------
+
+# The canonical asset list shown on the Outlook tab
+OUTLOOK_ASSETS = [
+    {"ticker": "SPY",   "name": "S&P 500",         "icon": "📈", "category": "EQUITY"},
+    {"ticker": "QQQ",   "name": "Nasdaq 100",       "icon": "💻", "category": "EQUITY"},
+    {"ticker": "VIX",   "name": "Volatility Index", "icon": "⚡", "category": "EQUITY",  "inverted": True},
+    {"ticker": "GLD",   "name": "Gold",             "icon": "🥇", "category": "COMMODITY"},
+    {"ticker": "SLV",   "name": "Silver",           "icon": "🥈", "category": "COMMODITY"},
+    {"ticker": "WTI",   "name": "WTI Crude Oil",    "icon": "🛢", "category": "COMMODITY"},
+    {"ticker": "COPX",  "name": "Copper",           "icon": "🔩", "category": "COMMODITY"},
+    {"ticker": "DXY",   "name": "US Dollar Index",  "icon": "💵", "category": "FX"},
+    {"ticker": "TLT",   "name": "20yr Treasuries",  "icon": "🏦", "category": "RATES"},
+    {"ticker": "BTC",   "name": "Bitcoin",          "icon": "₿",  "category": "CRYPTO"},
+    {"ticker": "ETH",   "name": "Ethereum",         "icon": "⟠",  "category": "CRYPTO"},
+    {"ticker": "ITA",   "name": "Defense ETF",      "icon": "🛡",  "category": "SECTOR"},
+]
+
+MAGNITUDE_LABELS = {1: "SMALL", 2: "MODERATE", 3: "LARGE", 4: "MAJOR"}
+CONFIDENCE_LABELS = {
+    (0,  35): "LOW",
+    (35, 60): "MEDIUM",
+    (60, 80): "HIGH",
+    (80, 101): "VERY HIGH",
+}
+
+
+def _confidence_label(score: int) -> str:
+    for (lo, hi), label in CONFIDENCE_LABELS.items():
+        if lo <= score < hi:
+            return label
+    return "MEDIUM"
+
+
+class OutlookGenerator:
+    """
+    Synthesizes signals from prediction markets, news, and alerts into a
+    forward-looking asset price outlook using Claude Sonnet.
+
+    Produces directional predictions (UP/DOWN), magnitude (1-4), and
+    confidence (0-100) for each asset in OUTLOOK_ASSETS over 24h and 48h.
+
+    Cached for CACHE_TTL seconds to limit Sonnet API calls.
+    """
+
+    CACHE_TTL = 900  # 15 minutes — outlook changes slowly
+    MODEL     = "claude-sonnet-4-6"
+
+    def __init__(self, api_key: str = ""):
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self._client = None
+        if key:
+            try:
+                import anthropic as _anthropic
+                self._client = _anthropic.Anthropic(api_key=key)
+                logger.info("OutlookGenerator: Claude Sonnet enabled")
+            except Exception as e:
+                logger.warning(f"OutlookGenerator init failed: {e}")
+        self._cache: Optional[Dict] = None
+        self._cache_time: Optional[datetime] = None
+
+    def generate(self, db) -> Dict:
+        """Return a full outlook dict, using cache if fresh enough."""
+        now = datetime.utcnow()
+        if (
+            self._cache is not None
+            and self._cache_time is not None
+            and (now - self._cache_time).total_seconds() < self.CACHE_TTL
+        ):
+            return self._cache
+
+        try:
+            result = self._compute(db)
+        except Exception as exc:
+            logger.error(f"OutlookGenerator._compute error: {exc}", exc_info=True)
+            result = self._fallback()
+
+        # Persist every fresh (non-fallback) prediction for future grading
+        if result.get("assets") and result.get("market_regime") != "NEUTRAL" or result.get("session_id"):
+            sid = result.get("session_id") or str(uuid.uuid4())
+            result["session_id"] = sid
+            try:
+                db.save_outlook_prediction(
+                    session_id       = sid,
+                    generated_at     = result.get("generated_at", now.isoformat()),
+                    market_regime    = result.get("market_regime", ""),
+                    outlook_summary  = result.get("outlook_summary", ""),
+                    dominant_themes_json = json.dumps(result.get("dominant_themes", [])),
+                    assets_json      = json.dumps(result.get("assets", {})),
+                )
+            except Exception as persist_err:
+                logger.warning(f"OutlookGenerator: failed to persist prediction: {persist_err}")
+
+        self._cache      = result
+        self._cache_time = now
+        return result
+
+    def invalidate(self):
+        """Force next call to recompute."""
+        self._cache = None
+        self._cache_time = None
+
+    # ── Internal ──────────────────────────────────────────────────────────
+
+    def _compute(self, db) -> Dict:
+        # 1. Gather intelligence from all available sources
+        live_markets  = db.get_top_volume_markets(limit=25, hours=2)
+        live_markets  = [m for m in live_markets if 3 < (m.get("latest_prob") or 50) < 97][:20]
+        resolved      = db.get_resolved_context_markets(limit=6, min_volume_24h=500_000)
+        alerts        = db.get_recent_alerts_feed(hours=12, limit=10)
+        news          = db.get_all_recent_news(hours=12, limit=20)
+
+        # 2. Build the prompt context blocks
+        live_block = "\n".join(
+            f'  • "{m["market_name"]}" — {m.get("latest_prob",50):.0f}%  '
+            f'(${(m.get("volume_24h") or 0)/1e6:.2f}M/day)'
+            for m in live_markets
+        ) or "  (no live markets available)"
+
+        resolved_block = "\n".join(
+            f'  • [RESOLVED {r["probability"]:.0f}%] "{r["market_name"]}" — '
+            f'${(r.get("volume_24h") or 0)/1e6:.2f}M/day'
+            for r in resolved
+        ) or "  (none)"
+
+        alert_block = "\n".join(
+            f'  • "{a["market_name"]}" moved {a.get("old_probability",0):.0f}%→'
+            f'{a.get("new_probability",0):.0f}% — signals: {a.get("reasons","")}'
+            for a in alerts
+        ) or "  (none)"
+
+        news_block = "\n".join(
+            f'  • [{n.get("source","").replace("rss.","").replace("feeds.","")}] '
+            f'"{n.get("title","")}"'
+            for n in news
+        ) or "  (no recent news)"
+
+        tickers = [a["ticker"] for a in OUTLOOK_ASSETS]
+        ticker_json = json.dumps(tickers)
+
+        prompt = f"""You are Market Sentinel's chief strategist — a senior macro analyst who synthesizes prediction markets, geopolitical intelligence, and financial news into actionable asset price outlooks.
+
+TODAY'S DATE: {datetime.utcnow().strftime("%B %d, %Y")}
+
+═══ LIVE PREDICTION MARKET SIGNALS (high-volume, unresolved) ═══
+{live_block}
+
+═══ RECENTLY RESOLVED MARKETS (what just happened) ═══
+{resolved_block}
+
+═══ RECENT MARKET SIGNAL ALERTS (notable moves) ═══
+{alert_block}
+
+═══ BREAKING NEWS HEADLINES ═══
+{news_block}
+
+═══ YOUR TASK ═══
+Based on ALL of the above intelligence, produce a structured 24-hour and 48-hour price outlook for these assets: {ticker_json}
+
+Asset notes:
+- VIX: predict the VIX level itself (UP = fear rising = risk-off)
+- DXY: predict USD index direction (UP = dollar strengthening)
+- TLT: predict bond prices (UP = yields falling = flight to safety)
+- ITA: Defense ETF (RTX, LMT, NOC, GD etc.)
+
+For EACH asset and EACH horizon (24h AND 48h), provide:
+- direction: "UP" or "DOWN"
+- magnitude_score: integer 1-4 (1=<0.5%, 2=0.5-1.5%, 3=1.5-3%, 4=>3%)
+- confidence: integer 0-100 (your conviction in this call)
+- drivers: list of exactly 3 short strings (max 5 words each) — the key forces driving this prediction
+
+Also provide:
+- outlook_summary: 3 sentences. The dominant macro narrative right now, what it means for markets, and the single biggest risk to watch.
+- market_regime: one of "RISK-OFF" | "RISK-ON" | "NEUTRAL" | "MIXED"
+- dominant_themes: list of 4-6 theme strings (e.g. "Iran war escalation", "Fed on hold", "Safe haven bid")
+- generated_note: one sentence explaining the #1 thing that changed your view most
+
+Return ONLY valid compact JSON (no whitespace, no markdown fences) in exactly this schema:
+{{
+  "outlook_summary": "...",
+  "market_regime": "RISK-OFF",
+  "dominant_themes": ["...", "..."],
+  "generated_note": "...",
+  "assets": {{
+    "SPY":  {{"24h": {{"direction": "DOWN", "magnitude_score": 2, "confidence": 72, "drivers": ["a","b","c"]}}, "48h": {{"direction": "DOWN", "magnitude_score": 3, "confidence": 61, "drivers": ["a","b","c"]}}}},
+    "QQQ":  {{"24h": {{...}}, "48h": {{...}}}},
+    "VIX":  {{"24h": {{...}}, "48h": {{...}}}},
+    "GLD":  {{"24h": {{...}}, "48h": {{...}}}},
+    "SLV":  {{"24h": {{...}}, "48h": {{...}}}},
+    "WTI":  {{"24h": {{...}}, "48h": {{...}}}},
+    "COPX": {{"24h": {{...}}, "48h": {{...}}}},
+    "DXY":  {{"24h": {{...}}, "48h": {{...}}}},
+    "TLT":  {{"24h": {{...}}, "48h": {{...}}}},
+    "BTC":  {{"24h": {{...}}, "48h": {{...}}}},
+    "ETH":  {{"24h": {{...}}, "48h": {{...}}}},
+    "ITA":  {{"24h": {{...}}, "48h": {{...}}}}
+  }}
+}}"""
+
+        if not self._client:
+            return self._fallback()
+
+        msg = self._client.messages.create(
+            model=self.MODEL,
+            max_tokens=4096,
+            system=(
+                "You are the chief market strategist at Market Sentinel. "
+                "You synthesize geopolitical intelligence, prediction markets, and macro signals "
+                "into authoritative asset price outlooks. Be direct, specific, and precise. "
+                "Your predictions must be grounded in the actual signals provided — do not be generic. "
+                "Return only valid compact JSON — no markdown, no commentary."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        raw = msg.content[0].text.strip()
+        # Strip any markdown fences
+        raw = re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = re.sub(r'\s*```\s*$', '', raw.strip())
+        # Find the first JSON object start
+        start = raw.find('{')
+        if start == -1:
+            raise ValueError("No JSON object found in Claude response")
+        # Attempt 1: strict parse of first complete JSON object (handles trailing text)
+        decoder = json.JSONDecoder()
+        try:
+            data, _ = decoder.raw_decode(raw, start)
+        except json.JSONDecodeError:
+            # Attempt 2: json_repair handles missing commas, truncated output, etc.
+            try:
+                from json_repair import repair_json
+                repaired = repair_json(raw[start:])
+                data = json.loads(repaired)
+                logger.info("OutlookGenerator: used json_repair to recover malformed response")
+            except Exception as repair_err:
+                raise ValueError(f"JSON repair also failed: {repair_err}")
+
+        # Enrich with static asset metadata and fill missing horizons
+        asset_meta = {a["ticker"]: a for a in OUTLOOK_ASSETS}
+        valid_tickers = set(asset_meta.keys())
+        # Strip any rogue keys Claude may have added (e.g. "24h", "48h" leaked as ticker names)
+        data["assets"] = {k: v for k, v in data.get("assets", {}).items() if k in valid_tickers}
+        for ticker, horizons in data.get("assets", {}).items():
+            meta = asset_meta.get(ticker, {})
+
+            # Fill any missing horizon by mirroring the other, with lower confidence
+            for h_primary, h_fallback in [("24h", "48h"), ("48h", "24h")]:
+                if not isinstance(horizons.get(h_primary), dict) or not horizons[h_primary].get("direction"):
+                    src = horizons.get(h_fallback) or {}
+                    horizons[h_primary] = {
+                        "direction":       src.get("direction", "—"),
+                        "magnitude_score": max(1, (src.get("magnitude_score") or 1) - 1),
+                        "confidence":      max(0, int((src.get("confidence") or 0) * 0.8)),
+                        "drivers":         src.get("drivers", []),
+                    }
+
+            for h in ("24h", "48h"):
+                pred = horizons[h]
+                if not isinstance(pred, dict):
+                    continue
+                pred["magnitude_label"] = MAGNITUDE_LABELS.get(pred.get("magnitude_score", 1), "SMALL")
+                pred["confidence_label"] = _confidence_label(pred.get("confidence", 50))
+
+            horizons["ticker"]   = ticker
+            horizons["name"]     = meta.get("name", ticker)
+            horizons["category"] = meta.get("category", "OTHER")
+            horizons["inverted"] = meta.get("inverted", False)
+
+        data["generated_at"] = datetime.utcnow().isoformat()
+        data["session_id"]   = str(uuid.uuid4())
+        data["asset_order"]  = [a["ticker"] for a in OUTLOOK_ASSETS]
+        return data
+
+    def _fallback(self) -> Dict:
+        """Return a skeleton structure when Claude is unavailable."""
+        assets = {}
+        for a in OUTLOOK_ASSETS:
+            assets[a["ticker"]] = {
+                "ticker": a["ticker"], "name": a["name"],
+                "category": a["category"], "inverted": a.get("inverted", False),
+                "24h": {"direction": "—", "magnitude_score": 1, "magnitude_label": "SMALL",
+                        "confidence": 0, "confidence_label": "LOW", "drivers": []},
+                "48h": {"direction": "—", "magnitude_score": 1, "magnitude_label": "SMALL",
+                        "confidence": 0, "confidence_label": "LOW", "drivers": []},
+            }
+        return {
+            "outlook_summary": "Outlook unavailable — Claude API not configured.",
+            "market_regime": "NEUTRAL",
+            "dominant_themes": [],
+            "generated_note": "",
+            "assets": assets,
+            "asset_order": [a["ticker"] for a in OUTLOOK_ASSETS],
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Outlook Grader — grades past predictions vs actual price moves
+# ---------------------------------------------------------------------------
+
+# Yahoo Finance ticker mapping for each outlook asset
+_YF_TICKERS: Dict[str, str] = {
+    "SPY":  "SPY",
+    "QQQ":  "QQQ",
+    "VIX":  "^VIX",
+    "GLD":  "GLD",
+    "SLV":  "SLV",
+    "WTI":  "CL=F",
+    "COPX": "COPX",
+    "DXY":  "DX-Y.NYB",
+    "TLT":  "TLT",
+    "BTC":  "BTC-USD",
+    "ETH":  "ETH-USD",
+    "ITA":  "ITA",
+}
+
+
+def _magnitude_tier(pct_change: float) -> int:
+    """Convert absolute % change to magnitude tier 1-4."""
+    a = abs(pct_change)
+    if a < 0.5:  return 1
+    if a < 1.5:  return 2
+    if a < 3.0:  return 3
+    return 4
+
+
+def _direction_correct(predicted: str, actual_pct: float, inverted: bool = False) -> bool:
+    """Return True if the predicted direction matches the actual move."""
+    adj = -actual_pct if inverted else actual_pct
+    if predicted == "UP":   return adj > 0.15
+    if predicted == "DOWN": return adj < -0.15
+    return False
+
+
+class OutlookGrader:
+    """
+    Grades persisted Outlook predictions against actual price data.
+
+    Workflow:
+      1. `run_grading(db)` — finds ungraded predictions, fetches prices via
+         yfinance, scores direction + magnitude, persists grades to DB.
+      2. `generate_reflection(grades)` — calls Claude Haiku to write a short
+         qualitative post-mortem on the most recent batch of grades.
+      3. `get_track_record(db)` — returns the full payload for the UI.
+    """
+
+    HAIKU_MODEL = "claude-haiku-4-5"
+    LIVE_CACHE_TTL = 120
+
+    def __init__(self, api_key: str = ""):
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self._client = None
+        self._live_cache: Optional[Dict[str, Any]] = None
+        self._live_cache_time: Optional[datetime] = None
+        if key:
+            try:
+                import anthropic as _ant
+                self._client = _ant.Anthropic(api_key=key)
+                logger.info("OutlookGrader: Claude Haiku enabled for reflections")
+            except Exception as e:
+                logger.warning(f"OutlookGrader init error: {e}")
+
+    # ── Price fetching ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _fetch_prices(tickers: list, start_dt: datetime, end_dt: datetime) -> Dict[str, Dict[str, float]]:
+        """
+        Returns {ticker: {date_str: close_price}} for all requested tickers
+        over the window [start_dt, end_dt].  Missing tickers return empty dicts.
+        """
+        try:
+            import yfinance as yf
+        except ImportError:
+            logger.error("yfinance not installed — cannot grade outlook predictions")
+            return {}
+
+        result: Dict[str, Dict[str, float]] = {}
+        # Fetch a slightly wider window to handle weekends / market closures
+        fetch_start = (start_dt - timedelta(days=3)).strftime("%Y-%m-%d")
+        fetch_end   = (end_dt   + timedelta(days=3)).strftime("%Y-%m-%d")
+
+        for tkr in tickers:
+            yf_sym = _YF_TICKERS.get(tkr, tkr)
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    df = yf.download(yf_sym, start=fetch_start, end=fetch_end,
+                                     interval="1d", progress=False, auto_adjust=True)
+                if df.empty:
+                    result[tkr] = {}
+                    continue
+                day_map: Dict[str, float] = {}
+                for idx, row in df.iterrows():
+                    date_key = idx.strftime("%Y-%m-%d")
+                    raw = row["Close"]
+                    try:
+                        day_map[date_key] = float(raw.iloc[0]) if hasattr(raw, "iloc") else float(raw)
+                    except Exception:
+                        pass
+                result[tkr] = day_map
+            except Exception as e:
+                logger.warning(f"OutlookGrader: price fetch failed for {yf_sym}: {e}")
+                result[tkr] = {}
+
+        return result
+
+    @staticmethod
+    def _start_close(day_map: Dict[str, float], target_dt: datetime) -> Optional[float]:
+        """
+        Find the closing price AT or BEFORE target_dt (prior-close logic).
+        Used for the prediction's start price.
+        """
+        for offset in [0, -1, -2, 1, -3, 2, -4, 3]:
+            key = (target_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+            if key in day_map:
+                return day_map[key]
+        return None
+
+    @staticmethod
+    def _end_close(day_map: Dict[str, float], target_dt: datetime) -> Optional[float]:
+        """
+        Find the closing price AT or AFTER target_dt (next-close logic).
+        Used for the prediction's end price so weekends look forward to Monday.
+        Returns None if no forward data is available yet (market hasn't closed).
+        """
+        for offset in [0, 1, 2, 3, -1, 4, -2]:
+            key = (target_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+            if key in day_map:
+                return day_map[key]
+        return None
+
+    @staticmethod
+    def _normalize_download_ts(ts: Any) -> Optional[datetime]:
+        if ts is None:
+            return None
+        try:
+            if hasattr(ts, "to_pydatetime"):
+                dt = ts.to_pydatetime()
+            elif isinstance(ts, datetime):
+                dt = ts
+            else:
+                return None
+        except Exception:
+            return None
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    def get_live_price_snapshot(self) -> Dict[str, Any]:
+        """
+        Best-effort current price snapshot across all tracked Outlook assets.
+        Used to verify that tracked asset prices are fresh and observable in UI.
+        """
+        now = datetime.utcnow()
+        if (
+            self._live_cache is not None
+            and self._live_cache_time is not None
+            and (now - self._live_cache_time).total_seconds() < self.LIVE_CACHE_TTL
+        ):
+            return self._live_cache
+
+        try:
+            import yfinance as yf
+        except ImportError:
+            logger.error("yfinance not installed — cannot build live price snapshot")
+            payload = {
+                "captured_at": now.isoformat(),
+                "source": "yfinance",
+                "assets": {},
+                "summary": {"live": 0, "delayed": 0, "stale": 0, "missing": len(OUTLOOK_ASSETS)},
+            }
+            self._live_cache = payload
+            self._live_cache_time = now
+            return payload
+
+        assets: Dict[str, Dict[str, Any]] = {}
+        counts = {"live": 0, "delayed": 0, "stale": 0, "missing": 0}
+
+        for asset in OUTLOOK_ASSETS:
+            ticker = asset["ticker"]
+            yf_sym = _YF_TICKERS.get(ticker, ticker)
+
+            latest_price = None
+            latest_dt = None
+            source_interval = None
+
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    intraday = yf.download(
+                        yf_sym,
+                        period="2d",
+                        interval="1m",
+                        progress=False,
+                        auto_adjust=False,
+                        prepost=True,
+                    )
+                if intraday is not None and not intraday.empty:
+                    close_series = intraday["Close"]
+                    try:
+                        close_series = close_series.dropna()
+                    except Exception:
+                        pass
+                    if hasattr(close_series, "empty") and not close_series.empty:
+                        raw_price = close_series.iloc[-1]
+                        raw_ts = close_series.index[-1]
+                        latest_price = float(raw_price.iloc[0]) if hasattr(raw_price, "iloc") else float(raw_price)
+                        latest_dt = self._normalize_download_ts(raw_ts)
+                        source_interval = "1m"
+            except Exception as e:
+                logger.debug(f"OutlookGrader live 1m fetch failed for {yf_sym}: {e}")
+
+            if latest_price is None or latest_dt is None:
+                try:
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        daily = yf.download(
+                            yf_sym,
+                            period="10d",
+                            interval="1d",
+                            progress=False,
+                            auto_adjust=False,
+                        )
+                    if daily is not None and not daily.empty:
+                        close_series = daily["Close"]
+                        try:
+                            close_series = close_series.dropna()
+                        except Exception:
+                            pass
+                        if hasattr(close_series, "empty") and not close_series.empty:
+                            raw_price = close_series.iloc[-1]
+                            raw_ts = close_series.index[-1]
+                            latest_price = float(raw_price.iloc[0]) if hasattr(raw_price, "iloc") else float(raw_price)
+                            latest_dt = self._normalize_download_ts(raw_ts)
+                            source_interval = "1d"
+                except Exception as e:
+                    logger.debug(f"OutlookGrader live 1d fetch failed for {yf_sym}: {e}")
+
+            if latest_price is None or latest_dt is None:
+                counts["missing"] += 1
+                assets[ticker] = {
+                    "ticker": ticker,
+                    "source_symbol": yf_sym,
+                    "price": None,
+                    "timestamp": None,
+                    "age_minutes": None,
+                    "freshness": "missing",
+                    "source_interval": source_interval,
+                }
+                continue
+
+            age_minutes = max(0.0, (now - latest_dt).total_seconds() / 60.0)
+            if age_minutes <= 20:
+                freshness = "live"
+            elif age_minutes <= 360:
+                freshness = "delayed"
+            else:
+                freshness = "stale"
+            counts[freshness] += 1
+
+            assets[ticker] = {
+                "ticker": ticker,
+                "source_symbol": yf_sym,
+                "price": round(latest_price, 6),
+                "timestamp": latest_dt.isoformat(),
+                "age_minutes": round(age_minutes, 2),
+                "freshness": freshness,
+                "source_interval": source_interval,
+            }
+
+        payload = {
+            "captured_at": now.isoformat(),
+            "source": "yfinance",
+            "assets": assets,
+            "summary": counts,
+        }
+        self._live_cache = payload
+        self._live_cache_time = now
+        return payload
+
+    # ── Grading ─────────────────────────────────────────────────────────
+
+    def _grade_one(
+        self,
+        session_id: str,
+        generated_at_str: str,
+        assets_json_str: str,
+        horizon: str,
+    ) -> Optional[Dict]:
+        """
+        Grade a single prediction/horizon pair.
+        Returns a grade payload dict or None if prices are unavailable.
+        """
+        generated_at  = datetime.fromisoformat(generated_at_str)
+        horizon_hours = 24 if horizon == "24h" else 48
+        end_dt        = generated_at + timedelta(hours=horizon_hours)
+
+        if end_dt > datetime.utcnow():
+            return None   # Too early to grade
+
+        assets = json.loads(assets_json_str)
+        tickers = list(assets.keys())
+
+        price_data = self._fetch_prices(tickers, generated_at, end_dt)
+        if not price_data:
+            return None
+
+        asset_meta = {a["ticker"]: a for a in OUTLOOK_ASSETS}
+        grades: Dict[str, Dict] = {}
+        correct = total = 0
+
+        for ticker, asset_info in assets.items():
+            pred = asset_info.get(horizon, {})
+            if not pred or pred.get("direction") in ("—", None, ""):
+                continue
+
+            day_map    = price_data.get(ticker, {})
+            price_open = self._start_close(day_map, generated_at)
+            price_end  = self._end_close(day_map, end_dt)
+
+            # Skip if prices unavailable or identical (same-day stale data)
+            if price_open is None or price_end is None or price_open == 0:
+                continue
+            if abs(price_end - price_open) < 1e-8 and price_open == price_end:
+                continue  # identical → no market data for end window yet
+
+            actual_pct   = (price_end - price_open) / price_open * 100
+            pred_dir     = pred.get("direction", "")
+            pred_mag     = pred.get("magnitude_score", 1)
+            inverted     = asset_meta.get(ticker, {}).get("inverted", False)
+
+            dir_ok       = _direction_correct(pred_dir, actual_pct, inverted)
+            actual_mag   = _magnitude_tier(actual_pct)
+            mag_diff     = abs(actual_mag - pred_mag)
+            mag_score    = max(0.0, 1.0 - mag_diff * 0.4)
+            composite    = round(dir_ok * 0.7 + mag_score * 0.3, 3)
+
+            grades[ticker] = {
+                "predicted_direction":       pred_dir,
+                "actual_direction":          "UP" if actual_pct > 0 else "DOWN",
+                "predicted_magnitude":       pred_mag,
+                "predicted_magnitude_label": MAGNITUDE_LABELS.get(pred_mag, "SMALL"),
+                "actual_magnitude":          actual_mag,
+                "actual_magnitude_label":    MAGNITUDE_LABELS.get(actual_mag, "SMALL"),
+                "actual_change_pct":         round(actual_pct, 2),
+                "direction_correct":         dir_ok,
+                "magnitude_score":           round(mag_score, 3),
+                "composite_score":           composite,
+                "price_start":               round(price_open, 4),
+                "price_end":                 round(price_end, 4),
+                "confidence":                pred.get("confidence", 0),
+                "confidence_label":          pred.get("confidence_label", ""),
+                "drivers":                   pred.get("drivers", []),
+            }
+
+            if dir_ok:
+                correct += 1
+            total += 1
+
+        if not grades:
+            return None
+
+        dir_acc = round(correct / total, 3) if total else 0.0
+        overall = round(sum(g["composite_score"] for g in grades.values()) / len(grades), 3)
+
+        return {
+            "session_id":         session_id,
+            "horizon":            horizon,
+            "direction_accuracy": dir_acc,
+            "overall_score":      overall,
+            "grades":             grades,
+            "total_graded":       total,
+            "total_correct":      correct,
+        }
+
+    def run_grading(self, db) -> int:
+        """
+        Check all pending predictions and grade any that are old enough.
+        Returns the number of new grade rows written.
+        """
+        new_grades = 0
+        for horizon in ("24h", "48h"):
+            pending = db.get_ungraded_predictions(horizon)
+            for pred in pending:
+                try:
+                    result = self._grade_one(
+                        session_id       = pred["session_id"],
+                        generated_at_str = pred["generated_at"],
+                        assets_json_str  = pred["assets_json"],
+                        horizon          = horizon,
+                    )
+                    if result:
+                        db.save_outlook_grade(
+                            session_id         = result["session_id"],
+                            horizon            = horizon,
+                            graded_at          = datetime.utcnow().isoformat(),
+                            overall_score      = result["overall_score"],
+                            direction_accuracy = result["direction_accuracy"],
+                            grades_json        = json.dumps(result["grades"]),
+                            reflection         = "",
+                        )
+                        logger.info(
+                            f"OutlookGrader: graded {result['session_id'][:8]}…/{horizon} "
+                            f"— {result['total_correct']}/{result['total_graded']} correct "
+                            f"({result['direction_accuracy']*100:.0f}%)"
+                        )
+                        new_grades += 1
+                except Exception as e:
+                    logger.warning(f"OutlookGrader: grading error for {pred.get('session_id')}: {e}")
+
+        # After grading, attach a fresh reflection to the most recent grade
+        if new_grades > 0:
+            self._refresh_reflection(db)
+
+        return new_grades
+
+    # ── Reflection ───────────────────────────────────────────────────────
+
+    def _refresh_reflection(self, db):
+        """Generate a Claude Haiku reflection and attach it to the latest grade."""
+        recent = db.get_outlook_grades(limit=10)
+        if not recent:
+            return
+        reflection = self._generate_reflection(recent)
+        if reflection:
+            db.update_outlook_grade_reflection(recent[0]["id"], reflection)
+
+    def _generate_reflection(self, grades_list: list) -> str:
+        """Call Claude Haiku for a 3-sentence post-mortem on recent grades."""
+        if not self._client or not grades_list:
+            return ""
+
+        lines = []
+        for g in grades_list[:6]:
+            horizon = g.get("horizon", "?")
+            acc     = (g.get("direction_accuracy") or 0) * 100
+            try:
+                grades = json.loads(g.get("grades_json") or "{}")
+            except Exception:
+                grades = {}
+            wrong = [t for t, v in grades.items() if not v.get("direction_correct")]
+            right = [t for t, v in grades.items() if v.get("direction_correct")]
+            date  = (g.get("pred_generated_at") or "")[:10]
+            regime = g.get("pred_regime") or "?"
+            lines.append(
+                f"• {date} {horizon} [{regime}]: {acc:.0f}% accuracy — "
+                f"correct: {right or 'none'}, wrong: {wrong or 'none'}"
+            )
+
+        block = "\n".join(lines)
+        try:
+            msg = self._client.messages.create(
+                model      = self.HAIKU_MODEL,
+                max_tokens = 350,
+                system     = (
+                    "You are a senior quant analyst reviewing an AI prediction model's "
+                    "track record on asset price direction calls. Be direct and specific."
+                ),
+                messages=[{"role": "user", "content": (
+                    f"Here are recent prediction results:\n{block}\n\n"
+                    "Write exactly 3 sentences:\n"
+                    "1. Which assets / conditions the model predicted best and why.\n"
+                    "2. Where it consistently fails and the likely cause.\n"
+                    "3. One specific, actionable change to improve accuracy.\n"
+                    "No preamble, no bullet points — just 3 plain sentences."
+                )}],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            logger.warning(f"OutlookGrader reflection error: {e}")
+            return ""
+
+    # ── Track record payload ─────────────────────────────────────────────
+
+    def get_track_record(self, db) -> Dict:
+        """
+        Run pending grading then return the full track-record payload for
+        the /api/outlook/track-record endpoint.
+        """
+        new = self.run_grading(db)
+
+        stats       = db.get_outlook_track_record_stats()
+        grades      = db.get_outlook_grades(limit=30)
+        reflection  = db.get_latest_outlook_reflection()
+        total_preds = db.count_outlook_predictions()
+
+        # Parse grades_json back to dicts for the API response
+        parsed_grades = []
+        for g in grades:
+            try:
+                g = dict(g)
+                g["grades"] = json.loads(g.pop("grades_json", "{}"))
+            except Exception:
+                g["grades"] = {}
+            # Compute total_graded / total_correct from grades dict
+            asset_grades = g["grades"]
+            g["total_graded"]  = len(asset_grades)
+            g["total_correct"] = sum(1 for v in asset_grades.values() if v.get("direction_correct"))
+            # Parse dominant_themes
+            try:
+                g["dominant_themes"] = json.loads(g.get("dominant_themes") or "[]")
+            except Exception:
+                g["dominant_themes"] = []
+            parsed_grades.append(g)
+
+        return {
+            "stats":              stats,
+            "grades":             parsed_grades,
+            "latest_reflection":  reflection,
+            "total_predictions":  total_preds,
+            "new_grades":         new,
+            "server_time":        datetime.utcnow().isoformat(),
+        }

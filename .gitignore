@@ -1,0 +1,29 @@
+# Local secrets
+config.json
+config.json^X
+
+# Python cache/build
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime data/logs
+*.log
+*.db
+*.db-shm
+*.db-wal
+market_sentinel.db*
+sentinel.db*
+
+# OS/editor
+.DS_Store
+*.swp
+*.swo
+
+# Local app state
+.claude/

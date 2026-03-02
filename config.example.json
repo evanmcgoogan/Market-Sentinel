@@ -1,0 +1,38 @@
+{
+  "twilio": {
+    "account_sid": "YOUR_TWILIO_ACCOUNT_SID",
+    "auth_token": "YOUR_TWILIO_AUTH_TOKEN",
+    "from_number": "+12345678901",
+    "to_number": "+10987654321"
+  },
+  "signals": {
+    "price_velocity_min_change": 5.0,
+    "price_velocity_time_window_minutes": 30,
+    "volume_shock_multiplier": 3.0,
+    "volume_baseline_hours": 24,
+    "thin_liquidity_max_volume": 10000.0,
+    "thin_liquidity_min_price_change": 3.0,
+    "cross_market_divergence_threshold": 8.0,
+    "late_stage_days_threshold": 7,
+    "late_stage_multiplier": 1.5,
+    "alert_threshold": 40.0
+  },
+  "polling": {
+    "poll_interval_seconds": 60,
+    "full_refresh_interval_minutes": 15
+  },
+  "alerts": {
+    "min_seconds_between_alerts": 60,
+    "max_alerts_per_hour": 20,
+    "cooldown_per_market_minutes": 10
+  },
+  "api": {
+    "batch_size": 100,
+    "max_markets": 500,
+    "inter_request_delay": 0.2,
+    "max_retries": 3,
+    "retry_base_delay": 5.0
+  },
+  "db_path": "market_sentinel.db",
+  "debug": false
+}

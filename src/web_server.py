@@ -1,0 +1,831 @@
+"""
+Market Sentinel Dashboard — Flask web server.
+
+Serves a real-time prediction market intelligence dashboard.
+Reads from the same SQLite DB as the sentinel monitor.
+
+Run with: python3 src/web_server.py
+Then open: http://localhost:5050
+"""
+
+import os
+import re
+import sys
+import logging
+import json
+import hashlib
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
+
+from flask import Flask, render_template, jsonify, request
+
+# Resolve paths relative to this file so the server can be started
+# from any working directory.
+SRC_DIR = Path(__file__).parent
+ROOT_DIR = SRC_DIR.parent
+
+sys.path.insert(0, str(SRC_DIR))
+
+from config import load_config
+from database import Database
+from story_generator import StoryGenerator, OutlookGenerator, OutlookGrader
+from whale_intelligence import WhaleBrain
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("dashboard")
+
+app = Flask(
+    __name__,
+    template_folder=str(ROOT_DIR / "dashboard"),
+    static_folder=str(ROOT_DIR / "dashboard" / "static"),
+    static_url_path="/static",
+)
+
+config = load_config(str(ROOT_DIR / "config.json"))
+db = Database(str(ROOT_DIR / config.db_path))
+
+# Read Anthropic key from config (or environment variable fallback)
+_anthropic_key = getattr(config, "anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+story_gen    = StoryGenerator(api_key=_anthropic_key)
+whale_brain  = WhaleBrain(api_key=_anthropic_key, db=db)
+outlook_gen  = OutlookGenerator(api_key=_anthropic_key)
+outlook_grader = OutlookGrader(api_key=_anthropic_key)
+_claude_active = bool(_anthropic_key)
+
+logger.info("Claude headlines: %s", "ENABLED (haiku)" if _claude_active else "DISABLED (add anthropic_api_key to config.json)")
+db.ensure_watchlist("Default")
+
+
+def _attach_sparklines(items: List[Any]) -> List[Dict]:
+    """
+    Convert story/cluster objects to dicts and attach sparkline history.
+
+    For single stories: query by market_name.
+    For clusters:       query the top-probability market's name.
+    """
+    dicts = [item.to_dict() for item in items]
+
+    # Collect all market names we need history for
+    name_to_idx: Dict[str, List[int]] = {}
+    for i, (item, d) in enumerate(zip(items, dicts)):
+        from story_generator import StoryCluster
+        if isinstance(item, StoryCluster):
+            key = item.stories[0].market_name   # top-probability market
+        else:
+            key = item.market_name
+        name_to_idx.setdefault(key, []).append(i)
+
+    all_names = list(name_to_idx.keys())
+    history = db.get_price_history_batch(all_names, hours=24, max_points=40)
+
+    for name, indices in name_to_idx.items():
+        pts = history.get(name, [])
+        for i in indices:
+            dicts[i]["sparkline"] = pts
+
+    return dicts
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/whales")
+def whales():
+    return render_template("whales.html")
+
+
+@app.route("/resolved")
+def resolved():
+    return render_template("resolved.html")
+
+
+@app.route("/outlook")
+def outlook():
+    return render_template("outlook.html")
+
+
+@app.route("/eval")
+def eval_dashboard():
+    return render_template("eval.html")
+
+
+@app.route("/api/whales")
+def api_whales():
+    """
+    Whale intelligence endpoint — returns large prediction market traders
+    with Claude-generated intelligence briefs.
+
+    Query params:
+      limit — max stories to return (default 10, max 20)
+
+    Returns:
+      { stories: [...], total: int, claude_active: bool, server_time: str }
+    """
+    try:
+        limit = min(int(request.args.get("limit", 10)), 20)
+    except (TypeError, ValueError):
+        limit = 10
+
+    stories = whale_brain.generate_whale_stories(limit=limit)
+    return jsonify({
+        "stories":      [s.to_dict() for s in stories],
+        "total":        len(stories),
+        "claude_active": _claude_active,
+        "server_time":  datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.route("/api/outlook")
+def api_outlook():
+    """
+    Asset price prediction endpoint — Claude Sonnet synthesizes all signals
+    into directional predictions with magnitude and confidence scores.
+    """
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
+    if force:
+        outlook_gen.invalidate()
+
+    data = outlook_gen.generate(db)
+    try:
+        data["live_prices"] = outlook_grader.get_live_price_snapshot()
+    except Exception as e:
+        logger.warning(f"Failed to attach live price snapshot: {e}")
+        data["live_prices"] = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "source": "yfinance",
+            "assets": {},
+            "summary": {"live": 0, "delayed": 0, "stale": 0, "missing": 0},
+        }
+    return jsonify(data)
+
+
+@app.route("/api/outlook/track-record")
+def api_outlook_track_record():
+    """
+    Track Record endpoint — grades past Outlook predictions vs actual prices,
+    returns per-asset accuracy stats, grade history, and Claude's reflection.
+    Triggers on-demand grading of any pending predictions.
+    """
+    payload = outlook_grader.get_track_record(db)
+    return jsonify(payload)
+
+
+@app.route("/api/resolved")
+def api_resolved():
+    """
+    Resolved Context endpoint — settled high-volume markets with Claude
+    explanations of what happened and live descendant markets to watch.
+    """
+    cards = story_gen.generate_resolved_context(db, limit=6)
+    return jsonify({
+        "cards":        cards,
+        "total":        len(cards),
+        "claude_active": _claude_active,
+        "server_time":  datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.route("/api/feed")
+def api_feed():
+    """
+    Primary API endpoint — returns stories, radar items, and system stats.
+    Polled by the dashboard JS every 30 seconds.
+    """
+    stories = story_gen.generate_stories(db, hours=24, limit=40)
+    radar   = story_gen.generate_radar(db, hours=24, limit=20)
+    stats   = db.get_system_stats()
+
+    return jsonify({
+        "stories":      _attach_sparklines(stories),
+        "radar":        _attach_sparklines(radar),
+        "stats":        stats,
+        "claude_active": _claude_active,
+        "server_time":  datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.route("/api/stats")
+def api_stats():
+    return jsonify(db.get_system_stats())
+
+
+@app.route("/api/eval/truth")
+def api_eval_truth():
+    """
+    Truth-engine endpoint:
+      - alert and move labeling metrics
+      - precision/recall slices
+      - calibration curves + error
+      - weekly trend
+    Query params:
+      force=1   -> recompute on demand before returning
+      days=30   -> lookback window
+    """
+    try:
+        lookback_days = max(7, min(180, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        lookback_days = 30
+
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
+    if force:
+        db.detect_market_move_events(
+            window_minutes=60,
+            min_change_pp=2.0,
+            scan_minutes=min(lookback_days * 24 * 60, 60 * 24 * 30),
+            per_market_cooldown_minutes=20,
+        )
+        db.label_alert_outcomes(horizon_minutes=180, success_move_pp=3.0, limit=5000)
+        db.label_market_move_outcomes(horizon_minutes=180, success_move_pp=2.5, limit=8000)
+        report = db.get_truth_engine_report(lookback_days=lookback_days, min_samples=5)
+        db.set_state("truth_engine_report", report)
+    else:
+        report = db.get_state("truth_engine_report", default=None)
+        if not report:
+            report = db.get_truth_engine_report(lookback_days=lookback_days, min_samples=5)
+
+    recent_moves = db.get_recent_move_events(hours=72, limit=80)
+    return jsonify({
+        "report": report,
+        "recent_moves": recent_moves,
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Helpers for the /api/context endpoint
+# ---------------------------------------------------------------------------
+
+_CTX_STOP = frozenset([
+    'a', 'an', 'the', 'is', 'are', 'will', 'would', 'could', 'should',
+    'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'but', 'by',
+    'from', 'with', 'be', 'been', 'have', 'has', 'had', 'was', 'were',
+    'this', 'that', 'which', 'who', 'what', 'when', 'where', 'if', 'than',
+    'as', 'do', 'does', 'did', 'how', 'why', 'not', 'no', 'more', 'most',
+    'before', 'after', 'during', 'between', 'over', 'under', 'about', 'up',
+    'out', 'it', 'its', 'get', 'got', 'also', 'than', 'just', 'into',
+])
+
+
+def _extract_search_terms(market_name: str, max_terms: int = 6) -> List[str]:
+    """
+    Pull the most distinctive content words from a market name to use
+    as news-cache search terms.
+
+    Prioritises:
+      1. Capitalised proper-noun tokens (names, places, orgs)
+      2. Other non-stop content words
+
+    Returns at most `max_terms` lower-cased strings.
+    """
+    # Strip leading "Will / Does / Is / Are…" question structure
+    cleaned = re.sub(
+        r'^(will|does|is|are|who will|what will|when will|can|has|have)\s+',
+        '', market_name.strip(), flags=re.IGNORECASE
+    )
+    cleaned = re.sub(r'\?$', '', cleaned).strip()
+
+    tokens = re.findall(r"[A-Za-z]{3,}", cleaned)
+
+    proper = [t for t in tokens if t[0].isupper() and t.lower() not in _CTX_STOP]
+    rest   = [t for t in tokens if t[0].islower() and t.lower() not in _CTX_STOP]
+
+    ordered = proper + rest
+    seen: Dict[str, bool] = {}
+    result = []
+    for t in ordered:
+        k = t.lower()
+        if k not in seen:
+            seen[k] = True
+            result.append(k)
+        if len(result) >= max_terms:
+            break
+
+    return result
+
+
+def _content_words(text: str) -> List[str]:
+    tokens = re.findall(r"[a-zA-Z]{3,}", (text or "").lower())
+    return [t for t in tokens if t not in _CTX_STOP]
+
+
+def _infer_why_now(signals: List[str], prob_change: Optional[float], news_count: int) -> str:
+    signal_blob = " ".join(signals).lower()
+    if "whale" in signal_blob:
+        return "Large-wallet flow has appeared ahead of broader repricing, suggesting informed positioning."
+    if "cross-market" in signal_blob or "gap" in signal_blob or "divergence" in signal_blob:
+        return "Cross-venue disagreement widened, indicating a fast information transmission gap between platforms."
+    if "odd-hour" in signal_blob or "off-peak" in signal_blob:
+        return "Activity spiked during off-peak hours, a pattern often associated with event-driven positioning."
+    if "no_news" in signal_blob or ("zero news" in signal_blob):
+        return "Price moved despite thin news coverage, which increases the odds of private or anticipatory information flow."
+    if prob_change is not None and abs(prob_change) >= 8:
+        return "A large move happened in a short window, pushing this market from noise into actionable signal territory."
+    if news_count > 0:
+        return "Fresh headline flow and market flow are now aligned, increasing confidence that this is information-driven."
+    return "Multiple independent micro-signals aligned in this cycle, elevating this event above baseline market noise."
+
+
+def _confidence_decomposition(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Deterministic confidence decomposition for UI transparency.
+    Components sum to <= signal_score.
+    """
+    score = float(item.get("signal_score", 0.0) or 0.0)
+    signal_types = [str(s) for s in (item.get("signal_types") or [])]
+    prob_change = abs(float(item.get("prob_change", 0.0) or 0.0))
+
+    weights = {
+        "price_velocity": 0.25,
+        "volume_shock": 0.18,
+        "thin_liquidity_jump": 0.12,
+        "cross_market_divergence": 0.16,
+        "odd_hour_activity": 0.10,
+        "acceleration": 0.10,
+        "orderbook_imbalance": 0.12,
+        "no_news_move": 0.12,
+        "whale_activity": 0.15,
+        "radar_momentum": 0.08,
+    }
+    components: List[Dict[str, Any]] = []
+    used = 0.0
+
+    for signal_type in signal_types[:6]:
+        w = weights.get(signal_type, 0.08)
+        contribution = round(min(score * w, score - used), 2)
+        if contribution <= 0:
+            continue
+        components.append({
+            "component": signal_type,
+            "points": contribution,
+            "rationale": f"{signal_type.replace('_', ' ')} contributed directly to this alert score.",
+        })
+        used += contribution
+        if used >= score:
+            break
+
+    move_bonus = min(6.0, prob_change * 0.4)
+    remaining = max(0.0, score - used)
+    if remaining > 0 and move_bonus > 0:
+        bonus = round(min(move_bonus, remaining), 2)
+        components.append({
+            "component": "price_regime",
+            "points": bonus,
+            "rationale": f"Absolute move size ({prob_change:.1f}pp) increased confidence in signal durability.",
+        })
+        used += bonus
+
+    residual = round(max(0.0, score - used), 2)
+    if residual > 0:
+        components.append({
+            "component": "base_context",
+            "points": residual,
+            "rationale": "Residual score reflects baseline heuristics and category-level priors.",
+        })
+    return components
+
+
+def _find_historical_analogs(item: Dict[str, Any], max_results: int = 4) -> List[Dict[str, Any]]:
+    market_name = item.get("market_name", "")
+    category = (item.get("category") or "").strip().lower()
+    target_words = set(_content_words(market_name))
+    candidates = db.get_recent_alert_candidates(category=category or None, days=180, limit=600)
+
+    scored: List[Dict[str, Any]] = []
+    for row in candidates:
+        if row.get("market_name") == market_name:
+            continue
+        words = set(_content_words(row.get("market_name", "")))
+        if not words or not target_words:
+            continue
+        overlap = len(target_words & words) / max(1, min(len(target_words), len(words)))
+        if overlap < 0.28:
+            continue
+        outcome = row.get("outcome_label")
+        scored.append({
+            "market_name": row.get("market_name"),
+            "platform": row.get("platform"),
+            "timestamp": row.get("timestamp"),
+            "similarity": round(overlap, 3),
+            "outcome_label": outcome,
+            "outcome_magnitude": row.get("outcome_magnitude"),
+            "time_to_hit_minutes": row.get("time_to_hit_minutes"),
+            "signal_score": row.get("signal_score"),
+            "signal_types": json.loads(row.get("signal_types") or "[]"),
+        })
+
+    scored.sort(
+        key=lambda r: (r["similarity"], r.get("signal_score") or 0),
+        reverse=True,
+    )
+    return scored[:max_results]
+
+
+def _build_thesis_key(item: Dict[str, Any]) -> str:
+    market = item.get("market_name", "")
+    category = item.get("category", "other")
+    words = _content_words(market)[:6]
+    base = f"{category.lower()}:{' '.join(words)}".strip(":")
+    digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:10]
+    return f"{category.lower()}-{digest}"
+
+
+def _normalize_workflow_item(raw_item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize dashboard payloads (single stories, radar cards, clusters)
+    so workflow/thesis/watchlist actions always receive market identifiers.
+    """
+    item = dict(raw_item or {})
+    if not item:
+        return {}
+
+    cluster_markets = item.get("cluster_markets")
+    first_cluster = None
+    if isinstance(cluster_markets, list) and cluster_markets:
+        first_cluster = cluster_markets[0] if isinstance(cluster_markets[0], dict) else None
+
+    if not item.get("market_name") and first_cluster:
+        item["market_name"] = str(first_cluster.get("market_name") or "").strip()
+    if not item.get("market_id"):
+        fallback_id = first_cluster.get("market_id") if first_cluster else None
+        item["market_id"] = str(fallback_id or item.get("id") or item.get("market_name") or "").strip()
+    if not item.get("platform") and first_cluster:
+        item["platform"] = first_cluster.get("platform")
+    if not item.get("platform"):
+        item["platform"] = "polymarket"
+    item["platform"] = str(item.get("platform") or "polymarket").strip().lower()
+
+    if item.get("probability") is None and first_cluster and first_cluster.get("probability") is not None:
+        item["probability"] = first_cluster.get("probability")
+    if item.get("old_probability") is None and first_cluster and first_cluster.get("old_probability") is not None:
+        item["old_probability"] = first_cluster.get("old_probability")
+    if item.get("prob_change") is None and first_cluster and first_cluster.get("prob_change") is not None:
+        item["prob_change"] = first_cluster.get("prob_change")
+
+    if not item.get("category"):
+        item["category"] = "OTHER"
+    item["category"] = str(item.get("category") or "OTHER").strip().upper()
+
+    signal_types = item.get("signal_types")
+    if not isinstance(signal_types, list):
+        signal_types = []
+    signals = item.get("signals")
+    if not isinstance(signals, list):
+        signals = []
+
+    item["signal_types"] = [str(s) for s in signal_types if s is not None]
+    item["signals"] = [str(s) for s in signals if s is not None]
+    item["market_name"] = str(item.get("market_name") or "").strip()
+    return item
+
+
+@app.route("/api/context")
+def api_context():
+    """
+    Per-story Intelligence Note endpoint.
+
+    Query params:
+      market   — full market name
+      prob     — current probability (0-100)
+      change   — probability change (signed float, optional)
+      platform — 'polymarket' or 'kalshi'
+      signals  — pipe-separated list of detected signal strings
+
+    Returns:
+      { analysis: str|null, news: [{title,source,url}], generated: bool }
+    """
+    market   = request.args.get("market", "").strip()
+    platform = request.args.get("platform", "").strip()
+
+    try:
+        prob   = float(request.args.get("prob", 50))
+    except (TypeError, ValueError):
+        prob   = 50.0
+
+    raw_change = request.args.get("change", "")
+    try:
+        change: Optional[float] = float(raw_change) if raw_change else None
+    except (TypeError, ValueError):
+        change = None
+
+    raw_signals = request.args.get("signals", "")
+    signals = [s.strip() for s in raw_signals.split("|") if s.strip()] if raw_signals else []
+
+    if not market:
+        return jsonify({"analysis": None, "news": [], "generated": False}), 400
+
+    # ── Search news cache ──────────────────────────────────────────────
+    terms    = _extract_search_terms(market)
+    articles = db.search_recent_news(terms, hours=48) if terms else []
+    news_out = [
+        {"title": a["title"], "source": a.get("source", ""), "url": a.get("url", "")}
+        for a in articles[:5]
+    ]
+
+    # ── Claude analysis ────────────────────────────────────────────────
+    analysis = None
+    generated = False
+
+    if _claude_active and story_gen._claude:
+        try:
+            result    = story_gen._claude.analyze_context(
+                market_name=market,
+                prob=prob,
+                change=change,
+                platform=platform,
+                signals=signals,
+                news_articles=articles[:5],
+            )
+            analysis  = result.get("analysis") or None
+            generated = bool(analysis)
+        except Exception as e:
+            logger.debug(f"Context analysis failed: {e}")
+
+    return jsonify({
+        "analysis":  analysis,
+        "news":      news_out,
+        "generated": generated,
+    })
+
+
+@app.route("/api/workflow/context", methods=["POST"])
+def api_workflow_context():
+    """
+    Build decision-workflow context for a selected alert/radar item.
+    Returns:
+      why_now, what_changed, historical_analogs, confidence_decomposition,
+      falsifiers, scenario_tree, next_best_actions
+    """
+    payload = request.get_json(silent=True) or {}
+    raw_item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+    item = _normalize_workflow_item(raw_item if isinstance(raw_item, dict) else {})
+
+    market_name = item.get("market_name", "")
+    if not market_name:
+        return jsonify({"error": "market_name required"}), 400
+
+    def _to_float(v: Any) -> Optional[float]:
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    prob = _to_float(item.get("probability"))
+    if prob is None:
+        prob = 50.0
+    old_prob_f = _to_float(item.get("old_probability"))
+    prob_change = item.get("prob_change")
+    prob_change_f = _to_float(prob_change) if prob_change is not None else (
+        (prob - old_prob_f) if old_prob_f is not None else None
+    )
+    signal_types = [str(s) for s in (item.get("signal_types") or [])]
+    signals = [str(s) for s in ((item.get("signals") or []) + signal_types)]
+
+    terms = _extract_search_terms(market_name)
+    news = db.search_recent_news(terms, hours=48) if terms else []
+    why_now = _infer_why_now(signals, prob_change_f, len(news))
+
+    what_changed = {
+        "probability_now": prob,
+        "probability_before": old_prob_f,
+        "delta_pp": round(prob_change_f, 2) if prob_change_f is not None else None,
+        "signal_count": len(signals),
+        "new_signal_types": [str(s) for s in (item.get("signal_types") or [])],
+        "summary": (
+            f"Probability moved {prob_change_f:+.1f}pp to {prob:.1f}% "
+            if prob_change_f is not None
+            else f"Current probability is {prob:.1f}% "
+        ) + f"with {len(signals)} active signal(s).",
+    }
+
+    analogs = _find_historical_analogs(item, max_results=4)
+    confidence = _confidence_decomposition(item)
+    hit_count = sum(1 for a in analogs if a.get("outcome_label") == 1)
+    labeled_analogs = sum(1 for a in analogs if a.get("outcome_label") in (0, 1))
+    analog_hit_rate = (hit_count / labeled_analogs) if labeled_analogs else None
+
+    direction = 1
+    if prob_change_f is not None and prob_change_f < 0:
+        direction = -1
+    elif prob_change_f is not None and prob_change_f > 0:
+        direction = 1
+    elif prob < 50:
+        direction = -1
+
+    invalidation_level = round(
+        max(1.0, min(99.0, prob - 6.0 if direction > 0 else prob + 6.0)),
+        1,
+    )
+    recapture_level = round(
+        max(1.0, min(99.0, prob + 6.0 if direction > 0 else prob - 6.0)),
+        1,
+    )
+    falsifiers = [
+        {
+            "condition": f"Probability crosses {invalidation_level:.1f}% against thesis direction for two consecutive updates.",
+            "why": "Sustained adverse repricing usually indicates thesis breakdown, not short-term noise.",
+        },
+        {
+            "condition": "Next 3 related signals average below 45 signal score.",
+            "why": "Weak follow-through implies the initial edge is decaying.",
+        },
+        {
+            "condition": f"Post-catalyst price fails to hold near {recapture_level:.1f}% threshold.",
+            "why": "Failed hold after catalyst often precedes mean reversion.",
+        },
+    ]
+
+    if direction > 0:
+        scenario_tree = [
+            {"scenario": "Confirm", "trigger": "Catalyst confirms; signal quality stays strong.", "range": [round(min(99.0, prob + 6.0), 1), round(min(99.0, prob + 16.0), 1)], "implication": "Lean into thesis quickly."},
+            {"scenario": "Base", "trigger": "Mixed data, no strong surprise.", "range": [round(max(1.0, prob - 4.0), 1), round(min(99.0, prob + 6.0), 1)], "implication": "Wait for cleaner confirmation."},
+            {"scenario": "Invalidate", "trigger": "Adverse catalyst or flow reversal.", "range": [round(max(1.0, prob - 18.0), 1), round(max(1.0, prob - 6.0), 1)], "implication": "Exit thesis and rotate."},
+        ]
+    else:
+        scenario_tree = [
+            {"scenario": "Confirm", "trigger": "Catalyst confirms downside thesis.", "range": [round(max(1.0, prob - 16.0), 1), round(max(1.0, prob - 6.0), 1)], "implication": "Lean into thesis quickly."},
+            {"scenario": "Base", "trigger": "Mixed data, no strong surprise.", "range": [round(max(1.0, prob - 6.0), 1), round(min(99.0, prob + 4.0), 1)], "implication": "Wait for cleaner confirmation."},
+            {"scenario": "Invalidate", "trigger": "Positive surprise or sharp reversal.", "range": [round(min(99.0, prob + 6.0), 1), round(min(99.0, prob + 18.0), 1)], "implication": "Exit thesis and rotate."},
+        ]
+
+    urgency_score = float(item.get("signal_score") or 0.0) * 0.55 + min(22.0, abs(prob_change_f or 0.0) * 2.8)
+    urgency_score += 10.0 if len(news) > 0 else 0.0
+    urgency_score = max(0.0, min(100.0, urgency_score))
+    if urgency_score >= 78:
+        decision_sla_minutes = 30
+    elif urgency_score >= 62:
+        decision_sla_minutes = 90
+    elif urgency_score >= 45:
+        decision_sla_minutes = 240
+    else:
+        decision_sla_minutes = 720
+
+    top_signal = signal_types[0].replace("_", " ") if signal_types else "primary catalyst"
+    next_best_actions = [
+        {
+            "priority": 1,
+            "action": f"Set invalidation guardrail at {invalidation_level:.1f}%.",
+            "why": "Pre-committed risk rules reduce reaction-time slippage.",
+            "eta_minutes": 10,
+        },
+        {
+            "priority": 2,
+            "action": f"Monitor {top_signal} follow-through in next cycle.",
+            "why": "Immediate follow-through determines whether edge is durable.",
+            "eta_minutes": min(120, decision_sla_minutes),
+        },
+        {
+            "priority": 3,
+            "action": "Compare with nearest historical analog before increasing conviction.",
+            "why": f"Labeled analog hit-rate is {analog_hit_rate:.0%}." if analog_hit_rate is not None else "Analog outcomes calibrate overconfidence.",
+            "eta_minutes": 20,
+        },
+    ]
+
+    return jsonify({
+        "why_now": why_now,
+        "what_changed": what_changed,
+        "historical_analogs": analogs,
+        "confidence_decomposition": confidence,
+        "falsifiers": falsifiers,
+        "scenario_tree": scenario_tree,
+        "next_best_actions": next_best_actions,
+        "decision_sla_minutes": decision_sla_minutes,
+    })
+
+
+@app.route("/api/watchlists", methods=["GET", "POST"])
+def api_watchlists():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        name = (payload.get("name") or "Default").strip()[:80] or "Default"
+        db.ensure_watchlist(name)
+    return jsonify({"watchlists": db.get_watchlists()})
+
+
+@app.route("/api/watchlists/enriched")
+def api_watchlists_enriched():
+    try:
+        limit = max(5, min(80, int(request.args.get("items", 40) or 40)))
+    except (TypeError, ValueError):
+        limit = 40
+    watchlists = db.get_watchlists_enriched(max_items_per_watchlist=limit)
+    return jsonify({"watchlists": watchlists})
+
+
+@app.route("/api/watchlists/items", methods=["POST", "DELETE"])
+def api_watchlist_items():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        watchlist_name = (payload.get("watchlist_name") or "Default").strip()[:80] or "Default"
+        market_id = str(payload.get("market_id") or "").strip()
+        market_name = str(payload.get("market_name") or "").strip()
+        platform = str(payload.get("platform") or "").strip().lower()
+        category = str(payload.get("category") or "").strip()
+        notes = str(payload.get("notes") or "").strip()
+        if not (market_id and market_name and platform):
+            return jsonify({"ok": False, "error": "market_id, market_name, platform required"}), 400
+        ok = db.add_watchlist_item(
+            watchlist_name=watchlist_name,
+            market_id=market_id,
+            market_name=market_name,
+            platform=platform,
+            category=category,
+            notes=notes,
+        )
+        return jsonify({"ok": ok})
+
+    payload = request.get_json(silent=True) or {}
+    item_id = payload.get("item_id")
+    if item_id is None:
+        return jsonify({"ok": False, "error": "item_id required"}), 400
+    ok = db.remove_watchlist_item(int(item_id))
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/thesis", methods=["GET", "POST"])
+def api_thesis():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        raw_item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+        item = _normalize_workflow_item(raw_item if isinstance(raw_item, dict) else {})
+        market_name = str(item.get("market_name") or "").strip()
+        if not market_name:
+            return jsonify({"ok": False, "error": "market_name required"}), 400
+
+        category = str(item.get("category") or "OTHER").strip().upper()
+        thesis_key = str(payload.get("thesis_key") or _build_thesis_key(item))
+        title = str(payload.get("title") or f"{category.title()} Thesis: {market_name[:72]}").strip()
+        note = str(payload.get("note") or "Started following this thesis from dashboard workflow.").strip()
+
+        db.follow_thesis(
+            thesis_key=thesis_key,
+            title=title,
+            category=category,
+            note=note,
+            payload={
+                "market_name": market_name,
+                "market_id": item.get("market_id"),
+                "platform": item.get("platform"),
+                "probability": item.get("probability"),
+                "signal_score": item.get("signal_score"),
+            },
+        )
+        return jsonify({"ok": True, "thesis_key": thesis_key})
+
+    limit = min(int(request.args.get("limit", 12)), 50)
+    return jsonify({"threads": db.get_thesis_threads(limit=limit)})
+
+
+@app.route("/api/thesis/copilot")
+def api_thesis_copilot():
+    try:
+        limit = max(1, min(50, int(request.args.get("limit", 12) or 12)))
+    except (TypeError, ValueError):
+        limit = 12
+    try:
+        lookback_days = max(7, min(120, int(request.args.get("days", 21) or 21)))
+    except (TypeError, ValueError):
+        lookback_days = 21
+    threads = db.get_thesis_copilot_threads(limit=limit, alert_lookback_days=lookback_days)
+    return jsonify({"threads": threads})
+
+
+@app.route("/api/thesis/<thesis_key>/notes", methods=["POST"])
+def api_thesis_note(thesis_key: str):
+    payload = request.get_json(silent=True) or {}
+    note = str(payload.get("note") or "").strip()
+    if not note:
+        return jsonify({"ok": False, "error": "note required"}), 400
+    ok = db.add_thesis_note(thesis_key=thesis_key, note=note, payload=payload.get("payload") or {})
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/thesis/<thesis_key>/actions", methods=["POST"])
+def api_thesis_action(thesis_key: str):
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip()
+    if not action:
+        return jsonify({"ok": False, "error": "action required"}), 400
+    rationale = str(payload.get("why") or payload.get("rationale") or "").strip()
+    ok = db.add_thesis_action(
+        thesis_key=thesis_key,
+        action=action,
+        rationale=rationale,
+        payload=payload.get("payload") or {},
+    )
+    return jsonify({"ok": ok})
+
+
+if __name__ == "__main__":
+    logger.info("=" * 55)
+    logger.info("Market Sentinel Dashboard starting...")
+    logger.info("Open http://localhost:5050 in your browser")
+    logger.info("=" * 55)
+    app.run(host="0.0.0.0", port=5050, debug=False, use_reloader=False)
