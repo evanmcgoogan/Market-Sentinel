@@ -78,13 +78,17 @@ deploy to Render using the included `render.yaml`.
 2. Open Render Blueprint deploy:
    `https://render.com/deploy?repo=https://github.com/evanmcgoogan/Market-Sentinel`
 3. Confirm service creation in Render (this uses:
-   - `gunicorn` web server
+   - background market monitor (`src/main.py`)
+   - `gunicorn` web server (`src/web_server.py`)
    - persistent disk at `/var/data`
    - health check at `/api/stats`)
 4. When deploy finishes, Render gives you a stable URL like:
    `https://market-sentinel.onrender.com`
 
 You can text that URL to anyone, and they can open it directly.
+
+Note: after first deploy, the dashboard may look sparse for 2-10 minutes while
+the monitor ingests initial market snapshots.
 
 ---
 
