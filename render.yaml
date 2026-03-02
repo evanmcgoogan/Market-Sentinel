@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: market-sentinel
+    runtime: python
+    plan: starter
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 180 src.web_server:app
+    healthCheckPath: /api/stats
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: SENTINEL_CONFIG
+        value: config.example.json
+      - key: SENTINEL_DB_PATH
+        value: /var/data/market_sentinel.db
+      - key: ANTHROPIC_API_KEY
+        sync: false
+    disk:
+      name: market-sentinel-data
+      mountPath: /var/data
+      sizeGB: 10

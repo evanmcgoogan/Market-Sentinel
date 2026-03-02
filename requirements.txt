@@ -4,6 +4,14 @@
 # Async HTTP client
 aiohttp>=3.9.0
 
+# Web dashboard
+Flask>=3.0.0
+gunicorn>=22.0.0
+
+# Market/LLM helpers used by dashboard features
+requests>=2.31.0
+yfinance>=0.2.50
+
 # Twilio SMS
 twilio>=8.10.0
 
