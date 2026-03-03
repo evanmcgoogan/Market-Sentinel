@@ -10,8 +10,18 @@ from enum import Enum
 
 
 def utcnow() -> datetime:
-    """Return timezone-aware UTC now. Use this everywhere instead of datetime.utcnow()."""
+    """Return timezone-aware UTC now."""
     return datetime.now(timezone.utc)
+
+
+def utcnow_naive() -> datetime:
+    """Return naive UTC datetime, format-compatible with existing DB strings."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utcnow_str() -> str:
+    """Return naive UTC ISO string for SQLite storage (matches existing DB format)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
 def ensure_aware(dt: datetime) -> datetime:
@@ -139,8 +149,8 @@ class Alert:
         """Human-readable list of why this alert fired."""
         return [s.description for s in self.signals]
 
-    def format_sms(self) -> str:
-        """Format alert for SMS delivery."""
+    def format_message(self) -> str:
+        """Format alert for logging/display."""
         lines = ["🚨 EARLY SIGNAL"]
         lines.append(f"{self.market.platform_str.upper()} — '{self.market.name}'")
 

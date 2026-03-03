@@ -15,15 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TwilioConfig:
-    """Twilio SMS configuration."""
-    account_sid: str = ""
-    auth_token: str = ""
-    from_number: str = ""  # Your Twilio phone number
-    to_number: str = ""    # Your personal phone number
-
-
-@dataclass
 class SignalThresholds:
     """
     Thresholds for signal detection.
@@ -284,7 +275,6 @@ class AutoTuneConfig:
 @dataclass
 class Config:
     """Master configuration container."""
-    twilio: TwilioConfig = field(default_factory=TwilioConfig)
     signals: SignalThresholds = field(default_factory=SignalThresholds)
     filters: MarketFilterConfig = field(default_factory=MarketFilterConfig)
     polling: PollingConfig = field(default_factory=PollingConfig)
@@ -374,8 +364,7 @@ def _validate_config(config: Config) -> List[str]:
     a = config.alerts
     if a.max_alerts_per_hour > 60:
         warnings.append(
-            f"max_alerts_per_hour={a.max_alerts_per_hour} is very high, "
-            f"may cause SMS costs"
+            f"max_alerts_per_hour={a.max_alerts_per_hour} is very high"
         )
 
     # API config
@@ -399,16 +388,6 @@ def _validate_config(config: Config) -> List[str]:
             "0.01 <= step_fraction <= max_step_fraction <= 0.25"
         )
 
-    # Twilio: warn if partially configured
-    t = config.twilio
-    twilio_fields = [t.account_sid, t.auth_token, t.from_number, t.to_number]
-    filled = sum(1 for f in twilio_fields if f and not f.startswith("YOUR_"))
-    if 0 < filled < 4:
-        warnings.append(
-            "Twilio is partially configured — all 4 fields "
-            "(account_sid, auth_token, from_number, to_number) are needed for SMS"
-        )
-
     return warnings
 
 
@@ -426,10 +405,6 @@ def load_config(config_path: Optional[str] = None) -> Config:
     if Path(config_path).exists():
         with open(config_path, "r") as f:
             data = json.load(f)
-
-        # Load Twilio config
-        if "twilio" in data:
-            config.twilio = TwilioConfig(**data["twilio"])
 
         # Load signal thresholds (merge with defaults for new fields)
         if "signals" in data:
@@ -493,16 +468,12 @@ def load_config(config_path: Optional[str] = None) -> Config:
     else:
         logger.info(f"No config file at {config_path}, using defaults")
 
-    # Override Twilio from environment variables if set
-    config.twilio.account_sid = os.environ.get("TWILIO_ACCOUNT_SID", config.twilio.account_sid)
-    config.twilio.auth_token = os.environ.get("TWILIO_AUTH_TOKEN", config.twilio.auth_token)
-    config.twilio.from_number = os.environ.get("TWILIO_FROM_NUMBER", config.twilio.from_number)
-    config.twilio.to_number = os.environ.get("TWILIO_TO_NUMBER", config.twilio.to_number)
-
     # Override news API key from env
     config.news.newsapi_key = os.environ.get("NEWSAPI_KEY", config.news.newsapi_key)
     # Override DB path from env (useful for hosted deployments with mounted disks)
     config.db_path = os.environ.get("SENTINEL_DB_PATH", config.db_path)
+    # Override Anthropic key from env (takes precedence over config file)
+    config.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", config.anthropic_api_key)
 
     # Validate and log warnings
     warnings = _validate_config(config)
@@ -517,12 +488,6 @@ def save_default_config(path: str = "config.example.json"):
     config = Config()
 
     data = {
-        "twilio": {
-            "account_sid": "YOUR_TWILIO_ACCOUNT_SID",
-            "auth_token": "YOUR_TWILIO_AUTH_TOKEN",
-            "from_number": "+1234567890",
-            "to_number": "+0987654321",
-        },
         "signals": {
             "price_velocity_min_change": config.signals.price_velocity_min_change,
             "price_velocity_time_window_minutes": config.signals.price_velocity_time_window_minutes,

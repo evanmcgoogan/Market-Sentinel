@@ -470,6 +470,30 @@ class WhaleBrain:
             or (now - self._cache_time).total_seconds() >= CACHE_TTL
         )
 
+        if cache_stale and self.db:
+            # Before triggering the 60-90s _compute scan, check whether the DB
+            # already has stories fresh enough to satisfy the TTL.  This means
+            # the first request after a process restart returns instantly using
+            # the DB-persisted result from the previous run.
+            try:
+                db_rows = self.db.get_recent_whale_stories(hours=1)
+                if db_rows:
+                    latest_ts_str = max(r.get("_cached_at", "") for r in db_rows)
+                    if latest_ts_str:
+                        latest_ts = datetime.fromisoformat(latest_ts_str)
+                        if latest_ts.tzinfo is None:
+                            latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+                        if (now - latest_ts).total_seconds() < CACHE_TTL:
+                            self._cache      = [_whale_story_from_dict(r) for r in db_rows]
+                            self._cache_time = latest_ts
+                            cache_stale = False
+                            logger.info(
+                                f"WhaleBrain: warmed cache from DB "
+                                f"({len(self._cache)} stories, {(now - latest_ts).total_seconds():.0f}s old)"
+                            )
+            except Exception as exc:
+                logger.debug(f"WhaleBrain DB warmup error: {exc}")
+
         if cache_stale:
             try:
                 fresh = self._compute(limit * 2)
@@ -601,7 +625,7 @@ class WhaleBrain:
         if not self.db:
             return []
         try:
-            cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+            cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)).isoformat()
             with self.db._get_conn() as conn:
                 rows = conn.execute(
                     """

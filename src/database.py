@@ -8,10 +8,15 @@ import sqlite3
 import json
 import logging
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import contextmanager
 from pathlib import Path
+
+
+def _utcnow() -> datetime:
+    """Naive UTC datetime — drop-in for _utcnow() without the 3.12 deprecation."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 logger = logging.getLogger(__name__)
@@ -317,8 +322,13 @@ class Database:
     @contextmanager
     def _get_conn(self):
         """Context manager for database connections."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        # Apply per-connection performance settings.
+        # synchronous=NORMAL is safe with WAL mode and significantly reduces fsync overhead.
+        # busy_timeout is a belt-and-suspenders fallback beyond the connect timeout.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=10000")
         try:
             yield conn
             conn.commit()
@@ -343,7 +353,7 @@ class Database:
         raw_data: Optional[Dict] = None,
     ):
         """Save a market snapshot."""
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = _utcnow().isoformat()
 
         with self._get_conn() as conn:
             conn.execute("""
@@ -364,7 +374,7 @@ class Database:
         minutes: int = 60,
     ) -> List[Dict[str, Any]]:
         """Get snapshots from the last N minutes."""
-        cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+        cutoff = (_utcnow() - timedelta(minutes=minutes)).isoformat()
 
         with self._get_conn() as conn:
             rows = conn.execute("""
@@ -402,7 +412,7 @@ class Database:
         Returns the mean of all recorded volume_24h values in the window,
         giving a more stable baseline than a single snapshot.
         """
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             row = conn.execute("""
@@ -432,7 +442,7 @@ class Database:
         market_category: Optional[str] = None,
     ):
         """Record that we sent an alert."""
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = _utcnow().isoformat()
 
         with self._get_conn() as conn:
             conn.execute("""
@@ -466,7 +476,7 @@ class Database:
 
     def count_recent_alerts(self, minutes: int = 60) -> int:
         """Count alerts in the last N minutes."""
-        cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+        cutoff = (_utcnow() - timedelta(minutes=minutes)).isoformat()
 
         with self._get_conn() as conn:
             row = conn.execute("""
@@ -484,7 +494,7 @@ class Database:
             conn.execute("""
                 INSERT OR REPLACE INTO state (key, value, updated_at)
                 VALUES (?, ?, ?)
-            """, (key, json.dumps(value), datetime.utcnow().isoformat()))
+            """, (key, json.dumps(value), _utcnow().isoformat()))
 
     def get_state(self, key: str, default: Any = None) -> Any:
         """Retrieve stored state."""
@@ -558,7 +568,7 @@ class Database:
 
     def ensure_watchlist(self, name: str = "Default") -> int:
         """Create watchlist if missing, return watchlist id."""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         with self._get_conn() as conn:
             conn.execute(
                 """
@@ -584,7 +594,7 @@ class Database:
     ) -> bool:
         """Add market to watchlist; idempotent on duplicate."""
         watchlist_id = self.ensure_watchlist(watchlist_name)
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         market_key = f"{platform}:{market_id}"
 
         with self._get_conn() as conn:
@@ -640,9 +650,12 @@ class Database:
         - latest probability and 24h probability delta
         - latest signal score/time/type
         - per-item priority score for decision queue ordering
+
+        Uses 3 batch queries (one per data source) instead of N×3 individual
+        queries so performance is O(1) in the number of watchlist items.
         """
-        now = datetime.utcnow()
-        move_cutoff = (now - timedelta(hours=move_window_hours)).isoformat()
+        now = _utcnow()
+        move_cutoff   = (now - timedelta(hours=move_window_hours)).isoformat()
         signal_cutoff = (now - timedelta(hours=signal_window_hours)).isoformat()
 
         with self._get_conn() as conn:
@@ -650,128 +663,209 @@ class Database:
                 "SELECT id, name, created_at, updated_at FROM watchlists ORDER BY updated_at DESC"
             ).fetchall()
 
-            out: List[Dict[str, Any]] = []
-            for wl in watchlists:
-                items = conn.execute(
-                    """
-                    SELECT id, market_id, market_name, platform, category, notes, added_at
-                    FROM watchlist_items
-                    WHERE watchlist_id = ?
-                    ORDER BY added_at DESC
-                    LIMIT ?
-                    """,
-                    (wl["id"], max_items_per_watchlist),
-                ).fetchall()
+            if not watchlists:
+                return []
 
-                enriched_items: List[Dict[str, Any]] = []
-                active_signals_24h = 0
-                stale_items = 0
-                hotness_total = 0.0
+            # ── 1. Collect all items across every watchlist in one query ──────
+            wl_ids     = [wl["id"] for wl in watchlists]
+            id_ph      = ",".join("?" * len(wl_ids))
+            all_items  = conn.execute(
+                f"""
+                SELECT id, watchlist_id, market_id, market_name, platform,
+                       category, notes, added_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY watchlist_id ORDER BY added_at DESC
+                       ) AS rn
+                FROM watchlist_items
+                WHERE watchlist_id IN ({id_ph})
+                """,
+                wl_ids,
+            ).fetchall()
+            # Respect per-watchlist limit
+            all_items = [r for r in all_items if r["rn"] <= max_items_per_watchlist]
 
-                for item in items:
-                    latest = conn.execute(
-                        """
-                        SELECT probability, timestamp
-                        FROM market_snapshots
-                        WHERE platform = ? AND market_id = ?
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                        """,
-                        (item["platform"], item["market_id"]),
-                    ).fetchone()
+            if not all_items:
+                # Return watchlists with empty items lists
+                return [
+                    {
+                        "id": wl["id"], "name": wl["name"],
+                        "created_at": wl["created_at"], "updated_at": wl["updated_at"],
+                        "item_count": 0, "active_signals_24h": 0,
+                        "stale_items": 0, "avg_priority": 0.0, "items": [],
+                    }
+                    for wl in watchlists
+                ]
 
-                    baseline = conn.execute(
-                        """
-                        SELECT probability, timestamp
-                        FROM market_snapshots
-                        WHERE platform = ? AND market_id = ? AND timestamp <= ?
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                        """,
-                        (item["platform"], item["market_id"], move_cutoff),
-                    ).fetchone()
+            # ── 2. Build composite keys for batch lookups ─────────────────────
+            mk_list = list({f"{r['platform']}:{r['market_id']}" for r in all_items})
+            mk_ph   = ",".join("?" * len(mk_list))
 
-                    alert = conn.execute(
-                        """
-                        SELECT signal_score, signal_types, timestamp
-                        FROM alert_history
-                        WHERE platform = ? AND market_id = ? AND timestamp > ?
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                        """,
-                        (item["platform"], item["market_id"], signal_cutoff),
-                    ).fetchone()
+            # ── 3a. Latest snapshot per (platform, market_id) ─────────────────
+            latest_rows = conn.execute(
+                f"""
+                SELECT s.platform, s.market_id, s.probability, s.timestamp
+                FROM market_snapshots s
+                JOIN (
+                    SELECT platform, market_id, MAX(timestamp) AS max_ts
+                    FROM market_snapshots
+                    WHERE (platform || ':' || market_id) IN ({mk_ph})
+                    GROUP BY platform, market_id
+                ) best ON s.platform = best.platform
+                      AND s.market_id = best.market_id
+                      AND s.timestamp = best.max_ts
+                """,
+                mk_list,
+            ).fetchall()
+            latest_map: Dict[str, Any] = {
+                f"{r['platform']}:{r['market_id']}": r for r in latest_rows
+            }
 
-                    latest_prob = float(latest["probability"]) if latest else None
-                    delta_24h = None
-                    if latest and baseline:
-                        delta_24h = round(float(latest["probability"]) - float(baseline["probability"]), 3)
+            # ── 3b. Baseline snapshot before move_cutoff ──────────────────────
+            baseline_rows = conn.execute(
+                f"""
+                SELECT s.platform, s.market_id, s.probability, s.timestamp
+                FROM market_snapshots s
+                JOIN (
+                    SELECT platform, market_id, MAX(timestamp) AS max_ts
+                    FROM market_snapshots
+                    WHERE (platform || ':' || market_id) IN ({mk_ph})
+                      AND timestamp <= ?
+                    GROUP BY platform, market_id
+                ) best ON s.platform = best.platform
+                      AND s.market_id = best.market_id
+                      AND s.timestamp = best.max_ts
+                """,
+                [*mk_list, move_cutoff],
+            ).fetchall()
+            baseline_map: Dict[str, Any] = {
+                f"{r['platform']}:{r['market_id']}": r for r in baseline_rows
+            }
 
-                    last_signal_score = float(alert["signal_score"]) if alert and alert["signal_score"] is not None else None
-                    last_signal_types = [str(s) for s in self._safe_json_list(alert["signal_types"] if alert else "[]")]
-                    last_signal_at = alert["timestamp"] if alert else None
+            # ── 3c. Latest alert after signal_cutoff ──────────────────────────
+            alert_rows = conn.execute(
+                f"""
+                SELECT a.platform, a.market_id, a.signal_score, a.signal_types, a.timestamp
+                FROM alert_history a
+                JOIN (
+                    SELECT platform, market_id, MAX(timestamp) AS max_ts
+                    FROM alert_history
+                    WHERE (platform || ':' || market_id) IN ({mk_ph})
+                      AND timestamp > ?
+                    GROUP BY platform, market_id
+                ) best ON a.platform = best.platform
+                      AND a.market_id = best.market_id
+                      AND a.timestamp = best.max_ts
+                """,
+                [*mk_list, signal_cutoff],
+            ).fetchall()
+            alert_map: Dict[str, Any] = {
+                f"{r['platform']}:{r['market_id']}": r for r in alert_rows
+            }
 
-                    if last_signal_at:
-                        try:
-                            last_dt = datetime.fromisoformat(last_signal_at)
-                            hours_since_signal = max(0.0, (now - last_dt).total_seconds() / 3600.0)
-                        except ValueError:
-                            hours_since_signal = None
-                    else:
-                        hours_since_signal = None
+        # ── 4. Group items by watchlist and enrich in Python ──────────────────
+        items_by_wl: Dict[int, List[Any]] = {}
+        for r in all_items:
+            items_by_wl.setdefault(int(r["watchlist_id"]), []).append(r)
 
-                    if latest:
-                        try:
-                            latest_dt = datetime.fromisoformat(latest["timestamp"])
-                            hours_since_snapshot = max(0.0, (now - latest_dt).total_seconds() / 3600.0)
-                        except ValueError:
-                            hours_since_snapshot = 999.0
-                    else:
-                        hours_since_snapshot = 999.0
+        out: List[Dict[str, Any]] = []
+        for wl in watchlists:
+            wl_items = items_by_wl.get(int(wl["id"]), [])
 
-                    if hours_since_snapshot > 12:
-                        stale_items += 1
-                    if last_signal_at and hours_since_signal is not None and hours_since_signal <= 24:
-                        active_signals_24h += 1
+            enriched_items: List[Dict[str, Any]] = []
+            active_signals_24h = 0
+            stale_items        = 0
+            hotness_total      = 0.0
 
-                    move_score = min(30.0, abs(delta_24h or 0.0) * 3.0)
-                    signal_score = (last_signal_score or 0.0) * 0.8
-                    freshness = 0.0
-                    if hours_since_signal is not None:
-                        freshness = max(0.0, 20.0 - hours_since_signal * 1.2)
-                    hotness = round(move_score + signal_score + freshness, 2)
-                    hotness_total += hotness
+            for item in wl_items:
+                mk = f"{item['platform']}:{item['market_id']}"
 
-                    enriched_items.append({
-                        **dict(item),
-                        "latest_probability": round(latest_prob, 3) if latest_prob is not None else None,
-                        "latest_snapshot_at": latest["timestamp"] if latest else None,
-                        "delta_24h_pp": delta_24h,
-                        "last_signal_score": round(last_signal_score, 2) if last_signal_score is not None else None,
-                        "last_signal_types": last_signal_types,
-                        "last_signal_at": last_signal_at,
-                        "hours_since_signal": round(hours_since_signal, 2) if hours_since_signal is not None else None,
-                        "decision_priority": hotness,
-                    })
+                latest   = latest_map.get(mk)
+                baseline = baseline_map.get(mk)
+                alert    = alert_map.get(mk)
 
-                enriched_items.sort(
-                    key=lambda it: (float(it.get("decision_priority") or 0.0), it.get("added_at") or ""),
-                    reverse=True,
+                latest_prob = float(latest["probability"]) if latest else None
+                delta_24h   = None
+                if latest and baseline:
+                    delta_24h = round(
+                        float(latest["probability"]) - float(baseline["probability"]), 3
+                    )
+
+                last_signal_score = (
+                    float(alert["signal_score"])
+                    if alert and alert["signal_score"] is not None
+                    else None
                 )
+                last_signal_types = [
+                    str(s) for s in self._safe_json_list(
+                        alert["signal_types"] if alert else "[]"
+                    )
+                ]
+                last_signal_at = alert["timestamp"] if alert else None
 
-                item_count = len(enriched_items)
-                avg_priority = round(hotness_total / item_count, 2) if item_count else 0.0
-                out.append({
-                    "id": wl["id"],
-                    "name": wl["name"],
-                    "created_at": wl["created_at"],
-                    "updated_at": wl["updated_at"],
-                    "item_count": item_count,
-                    "active_signals_24h": active_signals_24h,
-                    "stale_items": stale_items,
-                    "avg_priority": avg_priority,
-                    "items": enriched_items,
+                hours_since_signal = None
+                if last_signal_at:
+                    try:
+                        last_dt = datetime.fromisoformat(last_signal_at)
+                        hours_since_signal = max(
+                            0.0, (now - last_dt).total_seconds() / 3600.0
+                        )
+                    except ValueError:
+                        pass
+
+                hours_since_snapshot = 999.0
+                if latest:
+                    try:
+                        latest_dt = datetime.fromisoformat(latest["timestamp"])
+                        hours_since_snapshot = max(
+                            0.0, (now - latest_dt).total_seconds() / 3600.0
+                        )
+                    except ValueError:
+                        pass
+
+                if hours_since_snapshot > 12:
+                    stale_items += 1
+                if last_signal_at and hours_since_signal is not None and hours_since_signal <= 24:
+                    active_signals_24h += 1
+
+                move_score  = min(30.0, abs(delta_24h or 0.0) * 3.0)
+                sig_score   = (last_signal_score or 0.0) * 0.8
+                freshness   = (
+                    max(0.0, 20.0 - hours_since_signal * 1.2)
+                    if hours_since_signal is not None else 0.0
+                )
+                hotness = round(move_score + sig_score + freshness, 2)
+                hotness_total += hotness
+
+                enriched_items.append({
+                    **{k: item[k] for k in item.keys() if k != "rn"},
+                    "latest_probability":  round(latest_prob, 3) if latest_prob is not None else None,
+                    "latest_snapshot_at":  latest["timestamp"] if latest else None,
+                    "delta_24h_pp":        delta_24h,
+                    "last_signal_score":   round(last_signal_score, 2) if last_signal_score is not None else None,
+                    "last_signal_types":   last_signal_types,
+                    "last_signal_at":      last_signal_at,
+                    "hours_since_signal":  round(hours_since_signal, 2) if hours_since_signal is not None else None,
+                    "decision_priority":   hotness,
                 })
+
+            enriched_items.sort(
+                key=lambda it: (float(it.get("decision_priority") or 0.0), it.get("added_at") or ""),
+                reverse=True,
+            )
+
+            item_count   = len(enriched_items)
+            avg_priority = round(hotness_total / item_count, 2) if item_count else 0.0
+            out.append({
+                "id":                wl["id"],
+                "name":              wl["name"],
+                "created_at":        wl["created_at"],
+                "updated_at":        wl["updated_at"],
+                "item_count":        item_count,
+                "active_signals_24h": active_signals_24h,
+                "stale_items":       stale_items,
+                "avg_priority":      avg_priority,
+                "items":             enriched_items,
+            })
 
         return out
 
@@ -789,7 +883,7 @@ class Database:
             if rows and row:
                 conn.execute(
                     "UPDATE watchlists SET updated_at = ? WHERE id = ?",
-                    (datetime.utcnow().isoformat(), int(row["watchlist_id"])),
+                    (_utcnow().isoformat(), int(row["watchlist_id"])),
                 )
         return rows > 0
 
@@ -804,7 +898,7 @@ class Database:
         payload: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Create/update a followed thesis and append a follow event."""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         seed_text = ((payload or {}).get("market_name") or title or "").strip()
         topic_terms = self._topic_terms(seed_text)
         with self._get_conn() as conn:
@@ -845,7 +939,7 @@ class Database:
         payload: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Append a note update to an existing thesis."""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         with self._get_conn() as conn:
             row = conn.execute(
                 "SELECT id FROM thesis_threads WHERE thesis_key = ?",
@@ -883,7 +977,7 @@ class Database:
         if rationale:
             note += f" — {rationale.strip()}"
 
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         with self._get_conn() as conn:
             row = conn.execute(
                 "SELECT id FROM thesis_threads WHERE thesis_key = ?",
@@ -1173,7 +1267,7 @@ class Database:
         Return thesis threads enriched with copilot workflow fields:
         catalysts, falsifiers, scenario tree, urgency/SLA, and next actions.
         """
-        now = datetime.utcnow()
+        now = _utcnow()
         cutoff = (now - timedelta(days=alert_lookback_days)).isoformat()
 
         with self._get_conn() as conn:
@@ -1467,7 +1561,7 @@ class Database:
             return None
 
         category_norm = (category or "").strip().upper()
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
 
         with self._get_conn() as conn:
             if category_norm:
@@ -1555,7 +1649,7 @@ class Database:
         limit: int = 500,
     ) -> List[Dict[str, Any]]:
         """Candidate alerts for analog search and calibration UI."""
-        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        cutoff = (_utcnow() - timedelta(days=days)).isoformat()
         with self._get_conn() as conn:
             if category:
                 rows = conn.execute(
@@ -1600,7 +1694,7 @@ class Database:
         top_levels: Optional[Dict] = None,
     ):
         """Save an order book snapshot."""
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = _utcnow().isoformat()
 
         with self._get_conn() as conn:
             conn.execute("""
@@ -1622,7 +1716,7 @@ class Database:
         minutes: int = 60,
     ) -> List[Dict[str, Any]]:
         """Get order book snapshots from the last N minutes."""
-        cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+        cutoff = (_utcnow() - timedelta(minutes=minutes)).isoformat()
 
         with self._get_conn() as conn:
             rows = conn.execute("""
@@ -1656,7 +1750,7 @@ class Database:
         hours: int = 24,
     ) -> Optional[Dict[str, float]]:
         """Get average order book metrics over baseline period."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             row = conn.execute("""
@@ -1693,7 +1787,7 @@ class Database:
         Update rolling average volume for a given hour of day.
         Uses exponential moving average to weight recent data more.
         """
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = _utcnow().isoformat()
 
         with self._get_conn() as conn:
             existing = conn.execute("""
@@ -1765,7 +1859,7 @@ class Database:
         is_whale: bool = False,
     ):
         """Insert or update a whale wallet record."""
-        now = datetime.utcnow().isoformat()
+        now = _utcnow().isoformat()
         win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
 
         with self._get_conn() as conn:
@@ -1800,7 +1894,7 @@ class Database:
         market_name: Optional[str] = None,
     ):
         """Save a whale trade event."""
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = _utcnow().isoformat()
 
         with self._get_conn() as conn:
             conn.execute("""
@@ -1815,7 +1909,7 @@ class Database:
         minutes: int = 60,
     ) -> List[Dict[str, Any]]:
         """Get recent whale trades for a market."""
-        cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+        cutoff = (_utcnow() - timedelta(minutes=minutes)).isoformat()
 
         with self._get_conn() as conn:
             if market_id is None:
@@ -1873,7 +1967,7 @@ class Database:
         keywords: Optional[List[str]] = None,
     ):
         """Cache a news article."""
-        fetched_at = datetime.utcnow().isoformat()
+        fetched_at = _utcnow().isoformat()
 
         with self._get_conn() as conn:
             conn.execute("""
@@ -1895,7 +1989,7 @@ class Database:
         Search news cache for articles matching any of the search terms.
         Returns articles from the last N hours.
         """
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             # Build LIKE clauses for each search term
@@ -1922,7 +2016,7 @@ class Database:
 
     def get_all_recent_news(self, hours: int = 24, limit: int = 20) -> List[Dict[str, Any]]:
         """Return the most recent N news articles regardless of content."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
         with self._get_conn() as conn:
             rows = conn.execute("""
                 SELECT title, source, url, published_at, fetched_at
@@ -1935,7 +2029,7 @@ class Database:
 
     def count_recent_news(self, hours: int = 4) -> int:
         """Count total news articles in the last N hours."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             row = conn.execute("""
@@ -1953,7 +2047,7 @@ class Database:
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """Get recent alerts for the dashboard story feed, newest first."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             rows = conn.execute("""
@@ -1976,7 +2070,7 @@ class Database:
         Used for the dashboard radar section — markets approaching signal
         threshold but not yet confirmed as alerts.
         """
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             rows = conn.execute("""
@@ -2062,7 +2156,7 @@ class Database:
         Used to seed the radar with the most active markets even before
         price movement or signals have been detected.
         """
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             rows = conn.execute("""
@@ -2106,7 +2200,7 @@ class Database:
         Detect notable price moves from raw snapshots, independent of alerts.
         This expands the truth set to all tracked market behavior.
         """
-        now = datetime.utcnow()
+        now = _utcnow()
         last_scan_raw = self.get_state("truth_engine_last_move_scan", default=None)
         if isinstance(last_scan_raw, str):
             try:
@@ -2252,7 +2346,7 @@ class Database:
             labeled = 0
             wins = 0
             losses = 0
-            now = datetime.utcnow()
+            now = _utcnow()
 
             for row in rows:
                 try:
@@ -2303,7 +2397,7 @@ class Database:
                         outcome_checked_at = ?
                     WHERE id = ?
                     """,
-                    (label, float(best_move), time_to_hit, datetime.utcnow().isoformat(), row["id"]),
+                    (label, float(best_move), time_to_hit, _utcnow().isoformat(), row["id"]),
                 )
                 labeled += 1
                 if label == 1:
@@ -2323,7 +2417,7 @@ class Database:
         if lead_time_buckets is None:
             lead_time_buckets = [15, 60, 240]
 
-        cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
+        cutoff = (_utcnow() - timedelta(days=lookback_days)).isoformat()
         with self._get_conn() as conn:
             rows = conn.execute(
                 """
@@ -2383,7 +2477,7 @@ class Database:
         }
 
     def _alert_rows_for_eval(self, lookback_days: int = 30) -> List[Dict[str, Any]]:
-        cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
+        cutoff = (_utcnow() - timedelta(days=lookback_days)).isoformat()
         with self._get_conn() as conn:
             rows = conn.execute(
                 """
@@ -2548,7 +2642,7 @@ class Database:
             }
 
         return {
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": _utcnow().isoformat(),
             "alerts": {
                 **alert_perf,
                 "pr_curve": pr_curve,
@@ -2569,7 +2663,7 @@ class Database:
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Recent market move events for the evaluation dashboard."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
         with self._get_conn() as conn:
             rows = conn.execute(
                 """
@@ -2593,11 +2687,11 @@ class Database:
                 (address, condition_id, story_json, insider_score, generated_at)
                 VALUES (?, ?, ?, ?, ?)
             """, (address, condition_id or "", json.dumps(story_dict),
-                  insider_score, datetime.utcnow().isoformat()))
+                  insider_score, _utcnow().isoformat()))
 
     def get_recent_whale_stories(self, hours: int = 24) -> List[Dict[str, Any]]:
         """Retrieve whale stories generated within the last N hours."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
         with self._get_conn() as conn:
             rows = conn.execute("""
                 SELECT story_json, insider_score, generated_at
@@ -2617,7 +2711,7 @@ class Database:
 
     def purge_old_whale_stories(self, hours: int = 24):
         """Remove whale stories older than N hours."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
         with self._get_conn() as conn:
             conn.execute("DELETE FROM whale_stories_cache WHERE generated_at < ?", (cutoff,))
 
@@ -2628,12 +2722,12 @@ class Database:
                 SELECT COUNT(DISTINCT platform || market_id) as cnt
                 FROM market_snapshots
                 WHERE timestamp > ?
-            """, ((datetime.utcnow() - timedelta(hours=1)).isoformat(),)).fetchone()
+            """, ((_utcnow() - timedelta(hours=1)).isoformat(),)).fetchone()
 
             alert_count_24h = conn.execute("""
                 SELECT COUNT(*) as cnt FROM alert_history
                 WHERE timestamp > ?
-            """, ((datetime.utcnow() - timedelta(hours=24)).isoformat(),)).fetchone()
+            """, ((_utcnow() - timedelta(hours=24)).isoformat(),)).fetchone()
 
             latest_snapshot = conn.execute("""
                 SELECT MAX(timestamp) as ts FROM market_snapshots
@@ -2661,7 +2755,7 @@ class Database:
         if not market_names:
             return {}
 
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
         placeholders = ",".join("?" * len(market_names))
 
         with self._get_conn() as conn:
@@ -2698,8 +2792,8 @@ class Database:
 
     def cleanup_old_data(self, days: int = 7, compact: bool = False):
         """Remove old data to keep DB small."""
-        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-        news_cutoff = (datetime.utcnow() - timedelta(days=2)).isoformat()  # News ages faster
+        cutoff = (_utcnow() - timedelta(days=days)).isoformat()
+        news_cutoff = (_utcnow() - timedelta(days=2)).isoformat()  # News ages faster
 
         with self._get_conn() as conn:
             deleted_snapshots = conn.execute("""
@@ -2789,7 +2883,7 @@ class Database:
             labeled = 0
             wins = 0
             losses = 0
-            now = datetime.utcnow()
+            now = _utcnow()
 
             for row in rows:
                 try:
@@ -2814,7 +2908,7 @@ class Database:
                             outcome_checked_at = ?
                         WHERE id = ?
                         """,
-                        (datetime.utcnow().isoformat(), row["id"]),
+                        (_utcnow().isoformat(), row["id"]),
                     )
                     labeled += 1
                     losses += 1
@@ -2859,7 +2953,7 @@ class Database:
                         label,
                         float(best_move),
                         time_to_hit,
-                        datetime.utcnow().isoformat(),
+                        _utcnow().isoformat(),
                         row["id"],
                     ),
                 )
@@ -2885,7 +2979,7 @@ class Database:
         if lead_time_buckets is None:
             lead_time_buckets = [15, 60, 240]
 
-        cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
+        cutoff = (_utcnow() - timedelta(days=lookback_days)).isoformat()
         with self._get_conn() as conn:
             rows = conn.execute(
                 """
@@ -2997,6 +3091,26 @@ class Database:
             ).rowcount
         return rows > 0
 
+    def get_latest_outlook_prediction(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent outlook prediction row, or None."""
+        with self._get_conn() as conn:
+            row = conn.execute("""
+                SELECT session_id, generated_at, market_regime, outlook_summary,
+                       dominant_themes, assets_json
+                FROM outlook_predictions
+                ORDER BY generated_at DESC LIMIT 1
+            """).fetchone()
+        if not row:
+            return None
+        return {
+            "session_id":       row["session_id"],
+            "generated_at":     row["generated_at"],
+            "market_regime":    row["market_regime"],
+            "outlook_summary":  row["outlook_summary"],
+            "dominant_themes":  json.loads(row["dominant_themes"] or "[]"),
+            "assets":           json.loads(row["assets_json"] or "{}"),
+        }
+
     def get_ungraded_predictions(self, horizon: str) -> List[Dict[str, Any]]:
         """
         Return predictions that are old enough to grade for the given horizon
@@ -3005,7 +3119,7 @@ class Database:
         horizon='48h'  → predictions generated more than 49 hours ago
         """
         buffer_hours = 25 if horizon == "24h" else 49
-        cutoff = (datetime.utcnow() - timedelta(hours=buffer_hours)).isoformat()
+        cutoff = (_utcnow() - timedelta(hours=buffer_hours)).isoformat()
         with self._get_conn() as conn:
             rows = conn.execute(
                 """

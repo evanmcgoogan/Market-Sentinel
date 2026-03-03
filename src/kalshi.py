@@ -6,7 +6,7 @@ Fetches market data from Kalshi's public API.
 import asyncio
 import aiohttp
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 from models import Market, Platform
@@ -279,7 +279,7 @@ class KalshiClient:
                 volume_24h=volume_24h,
                 liquidity=liquidity,
                 end_date=end_date,
-                last_updated=datetime.utcnow(),
+                last_updated=datetime.now(timezone.utc).replace(tzinfo=None),
                 raw_data=raw,
             )
 

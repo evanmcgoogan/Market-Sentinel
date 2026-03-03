@@ -1,17 +1,15 @@
 """
-SMS alerting via Twilio.
-Sends text messages when signals are detected.
+Alert management for Market Sentinel.
+Logs alerts with rate limiting and records them to the database.
+(SMS via Twilio has been removed; alerts are logged and stored in DB.)
 """
 
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from twilio.rest import Client as TwilioClient
-from twilio.base.exceptions import TwilioRestException
-
-from models import Alert
-from config import TwilioConfig, AlertConfig
+from models import Alert, utcnow_naive
+from config import AlertConfig
 from database import Database
 
 
@@ -26,47 +24,30 @@ class AlertManager:
 
     def __init__(
         self,
-        twilio_config: TwilioConfig,
         alert_config: AlertConfig,
         db: Database,
     ):
-        self.twilio_config = twilio_config
         self.alert_config = alert_config
         self.db = db
-
-        # Initialize Twilio client if configured
-        self._twilio: Optional[TwilioClient] = None
-        if self._is_twilio_configured():
-            try:
-                self._twilio = TwilioClient(
-                    twilio_config.account_sid,
-                    twilio_config.auth_token,
-                )
-                logger.info("Twilio client initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Twilio: {e}")
-
-        # Load persisted rate-limiting state from DB
         self._load_rate_limit_state()
 
     def _load_rate_limit_state(self):
         """Load rate-limiting counters from database (survives restarts)."""
         state = self.db.get_state("alert_rate_limit", default=None)
-        now = datetime.utcnow()
+        now = utcnow_naive()
 
         if state:
             try:
-                self._hour_start = datetime.fromisoformat(state["hour_start"])
+                self._hour_start = _parse_naive(state["hour_start"]) or now
                 self._alerts_this_hour = state["alerts_this_hour"]
                 last = state.get("last_alert_time")
-                self._last_alert_time = datetime.fromisoformat(last) if last else None
+                self._last_alert_time = _parse_naive(last) if last else None
 
                 # Reset if the saved hour window has expired
                 if (now - self._hour_start).total_seconds() >= 3600:
                     self._alerts_this_hour = 0
                     self._hour_start = now
             except (KeyError, ValueError):
-                # Corrupted state, reset
                 self._last_alert_time = None
                 self._alerts_this_hour = 0
                 self._hour_start = now
@@ -83,33 +64,18 @@ class AlertManager:
             "last_alert_time": self._last_alert_time.isoformat() if self._last_alert_time else None,
         })
 
-    def _is_twilio_configured(self) -> bool:
-        """Check if Twilio credentials are set."""
-        return bool(
-            self.twilio_config.account_sid and
-            self.twilio_config.auth_token and
-            self.twilio_config.from_number and
-            self.twilio_config.to_number
-        )
-
     def _check_rate_limits(self) -> bool:
-        """
-        Check if we can send an alert (rate limiting).
-        Returns True if alert is allowed.
-        """
-        now = datetime.utcnow()
+        """Check if we can log an alert (rate limiting). Returns True if allowed."""
+        now = utcnow_naive()
 
-        # Reset hourly counter if needed
         if (now - self._hour_start).total_seconds() >= 3600:
             self._alerts_this_hour = 0
             self._hour_start = now
 
-        # Check hourly limit
         if self._alerts_this_hour >= self.alert_config.max_alerts_per_hour:
             logger.warning("Hourly alert limit reached")
             return False
 
-        # Check minimum time between alerts
         if self._last_alert_time:
             elapsed = (now - self._last_alert_time).total_seconds()
             if elapsed < self.alert_config.min_seconds_between_alerts:
@@ -119,10 +85,7 @@ class AlertManager:
         return True
 
     def _check_market_cooldown(self, alert: Alert) -> bool:
-        """
-        Check if this specific market is in cooldown.
-        Prevents spamming about the same market.
-        """
+        """Check if this specific market is in cooldown."""
         last_alert = self.db.get_last_alert_time(
             alert.market.platform_str,
             alert.market.market_id,
@@ -134,66 +97,38 @@ class AlertManager:
         cooldown_minutes = self.alert_config.cooldown_per_market_minutes
         cooldown_end = last_alert + timedelta(minutes=cooldown_minutes)
 
-        if datetime.utcnow() < cooldown_end:
-            remaining = (cooldown_end - datetime.utcnow()).total_seconds() / 60
+        now = utcnow_naive()
+        if now < cooldown_end:
+            remaining = (cooldown_end - now).total_seconds() / 60
             logger.debug(
-                f"Market cooldown: {alert.market.name[:30]} "
-                f"({remaining:.1f}m remaining)"
+                f"Market cooldown: {alert.market.name[:30]} ({remaining:.1f}m remaining)"
             )
             return False
 
         return True
 
     def can_send_alert(self, alert: Alert) -> bool:
-        """
-        Full check if we can send this alert.
-        Combines rate limits and market cooldown.
-        """
-        if not self._check_rate_limits():
-            return False
-
-        if not self._check_market_cooldown(alert):
-            return False
-
-        return True
+        """Full check if we can log this alert (rate limits + market cooldown)."""
+        return self._check_rate_limits() and self._check_market_cooldown(alert)
 
     def send_alert(self, alert: Alert) -> bool:
         """
-        Send an SMS alert.
-        Returns True if sent successfully.
+        Log alert and record it in the database.
+        Returns True if the alert was processed (not rate-limited).
         """
         if not self.can_send_alert(alert):
             return False
 
-        message_body = alert.format_sms()
+        message = alert.format_message()
 
-        # Log the alert (always, even if Twilio not configured)
         logger.info(f"ALERT: {alert.market.name}")
         logger.info(f"Score: {alert.signal_score:.0f}")
         logger.info(f"Reasons: {', '.join(alert.reasons)}")
+        print("\n" + "=" * 50)
+        print(message)
+        print("=" * 50 + "\n")
 
-        # Send SMS if Twilio is configured
-        if self._twilio:
-            try:
-                message = self._twilio.messages.create(
-                    body=message_body,
-                    from_=self.twilio_config.from_number,
-                    to=self.twilio_config.to_number,
-                )
-                logger.info(f"SMS sent: {message.sid}")
-
-            except TwilioRestException as e:
-                logger.error(f"Twilio error: {e}")
-                # Still record the alert attempt
-            except Exception as e:
-                logger.error(f"Failed to send SMS: {e}")
-        else:
-            # Print to console if no Twilio
-            print("\n" + "=" * 50)
-            print(message_body)
-            print("=" * 50 + "\n")
-
-        # Record alert in database
+        # Record alert in database (feeds the dashboard story engine)
         self.db.record_alert(
             platform=alert.market.platform_str,
             market_id=alert.market.market_id,
@@ -206,7 +141,7 @@ class AlertManager:
             market_category=alert.market.category,
         )
 
-        # Auto-link incoming alert to followed thesis thread, if applicable.
+        # Auto-link incoming alert to followed thesis thread, if applicable
         try:
             thesis_key = self.db.link_alert_to_followed_thesis(
                 market_name=alert.market.name,
@@ -221,11 +156,8 @@ class AlertManager:
         except Exception as e:
             logger.debug(f"Thesis auto-update skipped: {e}")
 
-        # Update rate limiting state
-        self._last_alert_time = datetime.utcnow()
+        self._last_alert_time = utcnow_naive()
         self._alerts_this_hour += 1
-
-        # Persist to DB so state survives restart
         self._save_rate_limit_state()
 
         return True
@@ -236,5 +168,14 @@ class AlertManager:
             "alerts_this_hour": self._alerts_this_hour,
             "max_per_hour": self.alert_config.max_alerts_per_hour,
             "last_alert": self._last_alert_time.isoformat() if self._last_alert_time else None,
-            "twilio_configured": self._is_twilio_configured(),
         }
+
+
+def _parse_naive(ts: Optional[str]) -> Optional[datetime]:
+    """Parse a naive-UTC ISO string from DB state. Returns None on error."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None

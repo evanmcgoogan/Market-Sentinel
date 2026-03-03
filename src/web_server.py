@@ -67,7 +67,9 @@ db = Database(str(ROOT_DIR / config.db_path))
 
 # Read Anthropic key from config (or environment variable fallback)
 _anthropic_key = getattr(config, "anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
-story_gen    = StoryGenerator(api_key=_anthropic_key)
+# Pass db to StoryGenerator so ClaudeHeadlineGenerator can persist/load its
+# headline cache — avoids cold-start Claude calls after a process restart.
+story_gen    = StoryGenerator(api_key=_anthropic_key, db=db)
 whale_brain  = WhaleBrain(api_key=_anthropic_key, db=db)
 outlook_gen  = OutlookGenerator(api_key=_anthropic_key)
 outlook_grader = OutlookGrader(api_key=_anthropic_key)
@@ -75,6 +77,16 @@ _claude_active = bool(_anthropic_key)
 
 logger.info("Claude headlines: %s", "ENABLED (haiku)" if _claude_active else "DISABLED (add anthropic_api_key to config.json)")
 db.ensure_watchlist("Default")
+
+# Warm in-memory caches from DB so the first request after a restart
+# is served instantly rather than triggering blocking Claude/API calls.
+if _claude_active:
+    outlook_gen.load_from_db(db)
+
+# Timestamp of the last force-run on /api/eval/truth.
+# Guards against concurrent/repeated calls saturating all gunicorn threads.
+_eval_force_last: Optional[datetime] = None
+_EVAL_FORCE_COOLDOWN_SECONDS = 300  # 5 minutes
 
 
 def _attach_sparklines(items: List[Any]) -> List[Dict]:
@@ -193,19 +205,44 @@ def api_outlook_track_record():
     return jsonify(payload)
 
 
+_RESOLVED_CACHE_TTL = 1800  # 30 minutes — resolved markets change slowly
+
+
 @app.route("/api/resolved")
 def api_resolved():
     """
     Resolved Context endpoint — settled high-volume markets with Claude
     explanations of what happened and live descendant markets to watch.
+
+    Response is cached in the DB for 30 minutes to avoid 6 sequential
+    blocking Claude calls on every cold start or new request.
     """
+    cached = db.get_state("api_resolved_cache", default=None)
+    if cached:
+        try:
+            ts = datetime.fromisoformat(cached["ts"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - ts).total_seconds() < _RESOLVED_CACHE_TTL:
+                return jsonify(cached["data"])
+        except Exception:
+            pass
+
     cards = story_gen.generate_resolved_context(db, limit=6)
-    return jsonify({
+    payload = {
         "cards":        cards,
         "total":        len(cards),
         "claude_active": _claude_active,
         "server_time":  datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    try:
+        db.set_state("api_resolved_cache", {
+            "ts":   datetime.now(timezone.utc).isoformat(),
+            "data": payload,
+        })
+    except Exception:
+        pass
+    return jsonify(payload)
 
 
 @app.route("/api/feed")
@@ -229,7 +266,22 @@ def api_feed():
 
 @app.route("/api/stats")
 def api_stats():
-    return jsonify(db.get_system_stats())
+    stats = db.get_system_stats()
+    # Render health-check uses /api/stats — surface data-freshness so the
+    # platform can detect a dead monitor process (not just a dead web process).
+    last_update = stats.get("last_update")
+    stale = True
+    if last_update:
+        try:
+            from datetime import datetime, timezone
+            lu = datetime.fromisoformat(last_update)
+            if lu.tzinfo is None:
+                lu = lu.replace(tzinfo=timezone.utc)
+            stale = (datetime.now(timezone.utc) - lu).total_seconds() > 600  # >10 min = stale
+        except Exception:
+            pass
+    stats["monitor_stale"] = stale
+    return jsonify(stats)
 
 
 @app.route("/api/eval/truth")
@@ -249,8 +301,17 @@ def api_eval_truth():
     except (TypeError, ValueError):
         lookback_days = 30
 
+    global _eval_force_last
     force = request.args.get("force", "").lower() in ("1", "true", "yes")
     if force:
+        now = datetime.now(timezone.utc)
+        if (
+            _eval_force_last is not None
+            and (now - _eval_force_last).total_seconds() < _EVAL_FORCE_COOLDOWN_SECONDS
+        ):
+            remaining = int(_EVAL_FORCE_COOLDOWN_SECONDS - (now - _eval_force_last).total_seconds())
+            return jsonify({"error": f"force-run cooldown active, retry in {remaining}s"}), 429
+        _eval_force_last = now
         db.detect_market_move_events(
             window_minutes=60,
             min_change_pp=2.0,
@@ -757,8 +818,9 @@ def api_watchlist_items():
         )
         return jsonify({"ok": ok})
 
+    # item_id can come from JSON body or query param (DELETE requests may have body stripped by proxies)
     payload = request.get_json(silent=True) or {}
-    item_id = payload.get("item_id")
+    item_id = payload.get("item_id") or request.args.get("item_id")
     if item_id is None:
         return jsonify({"ok": False, "error": "item_id required"}), 400
     ok = db.remove_watchlist_item(int(item_id))

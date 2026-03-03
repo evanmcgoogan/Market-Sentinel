@@ -1,10 +1,4 @@
 {
-  "twilio": {
-    "account_sid": "",
-    "auth_token": "",
-    "from_number": "",
-    "to_number": ""
-  },
   "signals": {
     "price_velocity_min_change": 5.0,
     "price_velocity_time_window_minutes": 30,

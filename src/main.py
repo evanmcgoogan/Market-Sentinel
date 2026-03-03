@@ -3,7 +3,7 @@
 Market Sentinel - Prediction Market Early Warning System
 
 Monitors Polymarket and Kalshi for abnormal market movements.
-Sends SMS alerts when signals are detected.
+Logs and records alerts when signals are detected.
 
 Now with:
 - Time-of-day anomaly detection
@@ -15,7 +15,6 @@ Now with:
 
 Run with: python main.py
 Stop with: Ctrl+C
-Test SMS: python main.py --test-sms
 """
 
 import asyncio
@@ -77,7 +76,7 @@ class MarketSentinel:
         self.db = Database(config.db_path)
         self.filter = MarketFilter(config.filters)
         self.matcher = MarketMatcher()
-        self.alerter = AlertManager(config.twilio, config.alerts, self.db)
+        self.alerter = AlertManager(config.alerts, self.db)
 
         # New components (initialized conditionally)
         self.news_monitor: Optional[NewsMonitor] = None
@@ -479,8 +478,7 @@ class MarketSentinel:
                 f"markets={poly_count}+{kalshi_count} | "
                 f"alerts_this_hour={alert_stats['alerts_this_hour']} | "
                 f"alerts_db_1h={recent_alerts_db} | "
-                f"news_cached={news_count} | "
-                f"twilio={'OK' if alert_stats['twilio_configured'] else 'OFF'}"
+                f"news_cached={news_count}"
             )
 
     async def _run_cycle(self):
@@ -564,45 +562,6 @@ class MarketSentinel:
         self._running = False
 
 
-async def send_test_sms(config: Config):
-    """Send a test SMS to verify Twilio is working."""
-    from twilio.rest import Client as TwilioClient
-
-    tc = config.twilio
-    if not all([tc.account_sid, tc.auth_token, tc.from_number, tc.to_number]):
-        print("ERROR: Twilio not fully configured. Check config.json.")
-        return False
-
-    try:
-        client = TwilioClient(tc.account_sid, tc.auth_token)
-        message = client.messages.create(
-            body=(
-                "🟢 Market Sentinel v2.0 is ONLINE\n"
-                "\n"
-                "Active signals:\n"
-                "• Price velocity\n"
-                "• Volume shock\n"
-                "• Thin liquidity\n"
-                "• Cross-market divergence\n"
-                "• Odd-hour activity (NEW)\n"
-                "• Price acceleration (NEW)\n"
-                "• Order book imbalance (NEW)\n"
-                "• No-news flag (NEW)\n"
-                "• Whale tracking (NEW)\n"
-                "• Multi-signal correlation (NEW)\n"
-                "\n"
-                "Hunting the sharks. 🦈"
-            ),
-            from_=tc.from_number,
-            to=tc.to_number,
-        )
-        print(f"✅ Test SMS sent! Message SID: {message.sid}")
-        return True
-    except Exception as e:
-        print(f"❌ Test SMS failed: {e}")
-        return False
-
-
 def setup_signal_handlers(sentinel: MarketSentinel):
     """Set up graceful shutdown on Ctrl+C."""
     def handler(signum, frame):
@@ -617,11 +576,6 @@ async def main():
     """Entry point."""
     # Load configuration
     config = load_config()
-
-    # Check for --test-sms flag
-    if "--test-sms" in sys.argv:
-        await send_test_sms(config)
-        return
 
     # Create sentinel
     sentinel = MarketSentinel(config)

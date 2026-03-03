@@ -16,4 +16,5 @@ exec python3 -m gunicorn \
   --workers 2 \
   --threads 4 \
   --timeout 180 \
+  --preload-app \
   src.web_server:app

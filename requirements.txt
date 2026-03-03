@@ -12,8 +12,9 @@ gunicorn>=22.0.0
 requests>=2.31.0
 yfinance>=0.2.50
 
-# Twilio SMS
-twilio>=8.10.0
+# Anthropic SDK — required for Claude headline generation, outlook, and whale intelligence
+anthropic>=0.39.0
+
 
 # No other dependencies needed - uses Python stdlib for:
 # - asyncio (async runtime)

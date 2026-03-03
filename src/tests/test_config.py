@@ -10,7 +10,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import (
-    Config, SignalThresholds, TwilioConfig, AlertConfig, APIConfig,
+    Config, SignalThresholds, AlertConfig, APIConfig,
     PollingConfig, load_config, _validate_config,
 )
 
@@ -51,26 +51,6 @@ class TestConfigValidation(unittest.TestCase):
         config.alerts.max_alerts_per_hour = 100
         warnings = _validate_config(config)
         self.assertTrue(any("max_alerts_per_hour" in w for w in warnings))
-
-    def test_warns_on_partial_twilio(self):
-        """Test warning when Twilio is partially configured."""
-        config = Config()
-        config.twilio.account_sid = "AC123456"
-        # Other fields empty
-        warnings = _validate_config(config)
-        self.assertTrue(any("Twilio" in w for w in warnings))
-
-    def test_no_warn_on_full_twilio(self):
-        """Test no warning when Twilio is fully configured."""
-        config = Config()
-        config.twilio = TwilioConfig(
-            account_sid="AC123",
-            auth_token="token",
-            from_number="+1111",
-            to_number="+2222",
-        )
-        warnings = _validate_config(config)
-        self.assertFalse(any("Twilio" in w for w in warnings))
 
     def test_fixes_low_max_retries(self):
         """Test that max_retries < 1 gets corrected."""
@@ -117,15 +97,6 @@ class TestConfigLoading(unittest.TestCase):
             self.assertTrue(config.debug)
         finally:
             os.unlink(path)
-
-    def test_env_overrides_twilio(self):
-        """Test that environment variables override Twilio config."""
-        os.environ["TWILIO_ACCOUNT_SID"] = "env_sid"
-        try:
-            config = load_config("/tmp/nonexistent.json")
-            self.assertEqual(config.twilio.account_sid, "env_sid")
-        finally:
-            del os.environ["TWILIO_ACCOUNT_SID"]
 
     def test_api_config_defaults(self):
         """Test API config has sensible defaults."""

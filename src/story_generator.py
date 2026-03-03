@@ -569,7 +569,18 @@ class ClaudeHeadlineGenerator:
     Caches by (truncated market name + probability bucket) so we don't
     re-call Claude on every 30-second dashboard refresh.
     Falls back silently to template text if no key is configured.
+
+    Cache is capped at _CACHE_MAX_SIZE entries (oldest-first eviction) to
+    prevent unbounded memory growth on long-running Render deployments.
+
+    The cache is persisted to the database (state table) so it survives
+    process restarts — cold-start Claude calls are avoided after the first
+    deployment day.
     """
+
+    _CACHE_MAX_SIZE = 500   # entries before eviction kicks in
+    _CACHE_EVICT_N  = 100   # how many oldest entries to drop at once
+    _STATE_KEY      = "claude_headline_cache"
 
     SYSTEM = (
         "You are the editor-in-chief of Market Sentinel — a financial intelligence terminal "
@@ -587,10 +598,31 @@ class ClaudeHeadlineGenerator:
         "Tone: authoritative, precise, zero fluff. Think Geopolitical Futures meets Bloomberg."
     )
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, db=None):
         import anthropic as _anthropic
         self._client = _anthropic.Anthropic(api_key=api_key)
+        self._db = db
         self._cache: Dict[str, Dict[str, str]] = {}
+        if db:
+            try:
+                saved = db.get_state(self._STATE_KEY, default=None)
+                if saved and isinstance(saved, dict):
+                    self._cache = saved
+                    logger.info(f"ClaudeHeadlineGenerator: warmed cache with {len(saved)} entries from DB")
+            except Exception as e:
+                logger.debug(f"Failed to load headline cache from DB: {e}")
+
+    def _persist_cache(self) -> None:
+        """Evict oldest entries if at capacity, then save full cache to DB."""
+        if len(self._cache) > self._CACHE_MAX_SIZE:
+            keys_to_drop = list(self._cache.keys())[:self._CACHE_EVICT_N]
+            for k in keys_to_drop:
+                del self._cache[k]
+        if self._db:
+            try:
+                self._db.set_state(self._STATE_KEY, self._cache)
+            except Exception as e:
+                logger.debug(f"Failed to save headline cache to DB: {e}")
 
     def _cache_key(self, name: str, prob: float) -> str:
         bucket = round(prob / 5) * 5  # snap to nearest 5pp
@@ -612,6 +644,7 @@ class ClaudeHeadlineGenerator:
             score=story.signal_score,
         )
         self._cache[key] = result
+        self._persist_cache()
         return result
 
     def enhance_cluster(self, cluster: StoryCluster) -> Dict[str, str]:
@@ -637,6 +670,7 @@ class ClaudeHeadlineGenerator:
         )
         result = self._call_raw(prompt)
         self._cache[key] = result
+        self._persist_cache()
         return result
 
     def _call(self, market, platform, prob, old_prob, change, signals, score) -> Dict[str, str]:
@@ -756,6 +790,7 @@ class ClaudeHeadlineGenerator:
 
         result = self._call_raw(prompt)
         self._cache[key] = result
+        self._persist_cache()
         return result
 
     def _call_raw(self, prompt: str) -> Dict[str, str]:
@@ -791,12 +826,12 @@ class StoryGenerator:
     CLAUDE_TOP_N      = 6      # enrich this many top stories with Claude
     CLAUDE_TIMEOUT    = 10     # seconds to wait for parallel Claude calls
 
-    def __init__(self, api_key: str = ""):
+    def __init__(self, api_key: str = "", db=None):
         self._claude: Optional[ClaudeHeadlineGenerator] = None
         key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if key:
             try:
-                self._claude = ClaudeHeadlineGenerator(key)
+                self._claude = ClaudeHeadlineGenerator(key, db=db)
                 logger.info("Claude headline generation enabled (haiku)")
             except Exception as e:
                 logger.warning(f"Claude init failed: {e}")
@@ -856,7 +891,7 @@ class StoryGenerator:
         RADAR_CATEGORIES = {"GEOPOLITICS", "CONFLICT", "POLITICS", "MARKETS", "TECHNOLOGY", "OTHER"}
         stories = [s for s in stories if s.category in RADAR_CATEGORIES]
 
-        stories.sort(key=lambda s: s.volume_24h, reverse=True)
+        stories.sort(key=lambda s: s.volume_24h or 0.0, reverse=True)
         return stories[:limit]
 
     def generate_resolved_context(self, db, limit: int = 6) -> List[Dict]:
@@ -1032,17 +1067,23 @@ class StoryGenerator:
             else:
                 return item, self._claude.enhance_story(item)
 
+        # Use manual pool management so we can call shutdown(cancel_futures=True)
+        # on timeout — the `with` statement's __exit__ calls shutdown(wait=True)
+        # which blocks until ALL Claude calls complete even after as_completed
+        # times out, turning the nominal 10s timeout into a 60s+ stall.
+        pool = ThreadPoolExecutor(max_workers=self.CLAUDE_TOP_N)
         try:
-            with ThreadPoolExecutor(max_workers=self.CLAUDE_TOP_N) as pool:
-                futures = {pool.submit(enrich, item): item for item in top}
-                for future in as_completed(futures, timeout=self.CLAUDE_TIMEOUT):
-                    item, enhanced = future.result()
-                    if enhanced.get("headline"):
-                        item.headline = enhanced["headline"]
-                    if enhanced.get("lede"):
-                        item.lede = enhanced["lede"]
+            futures = {pool.submit(enrich, item): item for item in top}
+            for future in as_completed(futures, timeout=self.CLAUDE_TIMEOUT):
+                item, enhanced = future.result()
+                if enhanced.get("headline"):
+                    item.headline = enhanced["headline"]
+                if enhanced.get("lede"):
+                    item.lede = enhanced["lede"]
         except (TimeoutError, Exception) as e:
             logger.debug(f"Claude enrichment partial/failed: {e}")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         return items
 
@@ -1546,9 +1587,33 @@ class OutlookGenerator:
         self._cache: Optional[Dict] = None
         self._cache_time: Optional[datetime] = None
 
+    def load_from_db(self, db) -> None:
+        """
+        Warm the in-memory cache from the most recent DB prediction.
+        Call once at startup to avoid a blocking Sonnet API call on the
+        first /api/outlook request after a process restart.
+        """
+        try:
+            row = db.get_latest_outlook_prediction()
+            if not row:
+                return
+            generated_at_str = row.get("generated_at", "")
+            if not generated_at_str:
+                return
+            ts = datetime.fromisoformat(generated_at_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age < self.CACHE_TTL:
+                self._cache      = row
+                self._cache_time = ts.replace(tzinfo=None)  # naive UTC for comparison
+                logger.info(f"OutlookGenerator: warmed cache from DB ({age:.0f}s old)")
+        except Exception as e:
+            logger.debug(f"OutlookGenerator.load_from_db failed: {e}")
+
     def generate(self, db) -> Dict:
         """Return a full outlook dict, using cache if fresh enough."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         if (
             self._cache is not None
             and self._cache_time is not None
@@ -1627,7 +1692,7 @@ class OutlookGenerator:
 
         prompt = f"""You are Market Sentinel's chief strategist — a senior macro analyst who synthesizes prediction markets, geopolitical intelligence, and financial news into actionable asset price outlooks.
 
-TODAY'S DATE: {datetime.utcnow().strftime("%B %d, %Y")}
+TODAY'S DATE: {datetime.now(timezone.utc).replace(tzinfo=None).strftime("%B %d, %Y")}
 
 ═══ LIVE PREDICTION MARKET SIGNALS (high-volume, unresolved) ═══
 {live_block}
@@ -1753,7 +1818,7 @@ Return ONLY valid compact JSON (no whitespace, no markdown fences) in exactly th
             horizons["category"] = meta.get("category", "OTHER")
             horizons["inverted"] = meta.get("inverted", False)
 
-        data["generated_at"] = datetime.utcnow().isoformat()
+        data["generated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         data["session_id"]   = str(uuid.uuid4())
         data["asset_order"]  = [a["ticker"] for a in OUTLOOK_ASSETS]
         return data
@@ -1777,7 +1842,7 @@ Return ONLY valid compact JSON (no whitespace, no markdown fences) in exactly th
             "generated_note": "",
             "assets": assets,
             "asset_order": [a["ticker"] for a in OUTLOOK_ASSETS],
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         }
 
 
@@ -1939,7 +2004,7 @@ class OutlookGrader:
         Best-effort current price snapshot across all tracked Outlook assets.
         Used to verify that tracked asset prices are fresh and observable in UI.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         if (
             self._live_cache is not None
             and self._live_cache_time is not None
@@ -2085,7 +2150,7 @@ class OutlookGrader:
         horizon_hours = 24 if horizon == "24h" else 48
         end_dt        = generated_at + timedelta(hours=horizon_hours)
 
-        if end_dt > datetime.utcnow():
+        if end_dt > datetime.now(timezone.utc).replace(tzinfo=None):
             return None   # Too early to grade
 
         assets = json.loads(assets_json_str)
@@ -2183,7 +2248,7 @@ class OutlookGrader:
                         db.save_outlook_grade(
                             session_id         = result["session_id"],
                             horizon            = horizon,
-                            graded_at          = datetime.utcnow().isoformat(),
+                            graded_at          = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                             overall_score      = result["overall_score"],
                             direction_accuracy = result["direction_accuracy"],
                             grades_json        = json.dumps(result["grades"]),
@@ -2299,5 +2364,5 @@ class OutlookGrader:
             "latest_reflection":  reflection,
             "total_predictions":  total_preds,
             "new_grades":         new,
-            "server_time":        datetime.utcnow().isoformat(),
+            "server_time":        datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         }
