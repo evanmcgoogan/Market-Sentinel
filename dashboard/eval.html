@@ -409,17 +409,27 @@
     }
 
     async function loadTruth(force = false) {
-      const url = '/api/eval/truth?days=30' + (force ? '&force=1' : '');
-      const res = await fetch(url);
-      const data = await res.json();
-      const report = data.report || {};
-      const dt = new Date(data.server_time || Date.now());
-      $('stamp').textContent = `Updated ${dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}`;
-      renderSummary(report);
-      renderPRCurve(report.alerts?.pr_curve || []);
-      renderCalibration(report.calibration?.curve || []);
-      renderBreakdowns(report);
-      renderMovesTable(data.recent_moves || []);
+      try {
+        const url = '/api/eval/truth?days=30' + (force ? '&force=1' : '');
+        const res = await fetch(url);
+        if (!res.ok) {
+          // Handles 429 rate-limit, 503 during deploy, etc.
+          const err = await res.json().catch(() => ({}));
+          $('stamp').textContent = err.error || `Server error ${res.status}`;
+          return;
+        }
+        const data = await res.json();
+        const report = data.report || {};
+        const dt = new Date(data.server_time || Date.now());
+        $('stamp').textContent = `Updated ${dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}`;
+        renderSummary(report);
+        renderPRCurve(report.alerts?.pr_curve || []);
+        renderCalibration(report.calibration?.curve || []);
+        renderBreakdowns(report);
+        renderMovesTable(data.recent_moves || []);
+      } catch (e) {
+        $('stamp').textContent = 'Connection error — retrying';
+      }
     }
 
     $('refresh-btn').addEventListener('click', async () => {
