@@ -147,30 +147,71 @@ def eval_dashboard():
     return render_template("eval.html")
 
 
+_WHALES_CACHE_TTL = 300  # 5 minutes — whale scans are expensive
+
+
 @app.route("/api/whales")
 def api_whales():
     """
     Whale intelligence endpoint — returns large prediction market traders
     with Claude-generated intelligence briefs.
 
-    Query params:
-      limit — max stories to return (default 10, max 20)
-
-    Returns:
-      { stories: [...], total: int, claude_active: bool, server_time: str }
+    Uses stale-while-revalidate: serves cached data instantly, refreshes
+    in background.  First-ever request returns an empty shell so the
+    browser never hangs waiting for a 90-second compute.
     """
+    import threading
+
     try:
         limit = min(int(request.args.get("limit", 10)), 20)
     except (TypeError, ValueError):
         limit = 10
 
-    stories = whale_brain.generate_whale_stories(limit=limit)
-    return jsonify({
-        "stories":      [s.to_dict() for s in stories],
-        "total":        len(stories),
-        "claude_active": _claude_active,
-        "server_time":  datetime.now(timezone.utc).isoformat(),
-    })
+    def _empty_payload():
+        return {
+            "stories":      [],
+            "total":        0,
+            "claude_active": _claude_active,
+            "server_time":  datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _compute_and_cache():
+        try:
+            stories = whale_brain.generate_whale_stories(limit=limit)
+            payload = {
+                "stories":      [s.to_dict() for s in stories],
+                "total":        len(stories),
+                "claude_active": _claude_active,
+                "server_time":  datetime.now(timezone.utc).isoformat(),
+            }
+            db.set_state("api_whales_cache", {
+                "ts":   datetime.now(timezone.utc).isoformat(),
+                "data": payload,
+            })
+        except Exception as exc:
+            logger.debug(f"Whales cache refresh failed: {exc}")
+
+    cached = db.get_state("api_whales_cache", default=None)
+    if cached:
+        try:
+            ts = datetime.fromisoformat(cached["ts"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age < _WHALES_CACHE_TTL:
+                return jsonify(cached["data"])
+            # Stale — serve stale data, refresh in background
+            threading.Thread(target=_compute_and_cache, daemon=True).start()
+            return jsonify(cached["data"])
+        except Exception:
+            pass
+
+    # No cache at all — return empty shell, compute in background
+    threading.Thread(target=_compute_and_cache, daemon=True).start()
+    return jsonify(_empty_payload())
+
+
+_OUTLOOK_CACHE_TTL = 600  # 10 minutes — outlook is a large Claude call
 
 
 @app.route("/api/outlook")
@@ -178,23 +219,58 @@ def api_outlook():
     """
     Asset price prediction endpoint — Claude Sonnet synthesizes all signals
     into directional predictions with magnitude and confidence scores.
-    """
-    force = request.args.get("force", "").lower() in ("1", "true", "yes")
-    if force:
-        outlook_gen.invalidate()
 
-    data = outlook_gen.generate(db)
-    try:
-        data["live_prices"] = outlook_grader.get_live_price_snapshot()
-    except Exception as e:
-        logger.warning(f"Failed to attach live price snapshot: {e}")
-        data["live_prices"] = {
-            "captured_at": datetime.now(timezone.utc).isoformat(),
-            "source": "yfinance",
-            "assets": {},
-            "summary": {"live": 0, "delayed": 0, "stale": 0, "missing": 0},
-        }
-    return jsonify(data)
+    Uses stale-while-revalidate: serves cached data instantly, refreshes
+    in background.  First-ever request returns the template fallback.
+    """
+    import threading
+
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
+
+    def _compute_and_cache():
+        try:
+            if force:
+                outlook_gen.invalidate()
+            data = outlook_gen.generate(db)
+            try:
+                data["live_prices"] = outlook_grader.get_live_price_snapshot()
+            except Exception:
+                data["live_prices"] = {
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "yfinance", "assets": {},
+                    "summary": {"live": 0, "delayed": 0, "stale": 0, "missing": 0},
+                }
+            db.set_state("api_outlook_cache", {
+                "ts":   datetime.now(timezone.utc).isoformat(),
+                "data": data,
+            })
+        except Exception as exc:
+            logger.debug(f"Outlook cache refresh failed: {exc}")
+
+    cached = db.get_state("api_outlook_cache", default=None)
+    if cached and not force:
+        try:
+            ts = datetime.fromisoformat(cached["ts"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age < _OUTLOOK_CACHE_TTL:
+                return jsonify(cached["data"])
+            # Stale — serve stale data, refresh in background
+            threading.Thread(target=_compute_and_cache, daemon=True).start()
+            return jsonify(cached["data"])
+        except Exception:
+            pass
+
+    # No cache (or force) — return fallback, compute in background
+    threading.Thread(target=_compute_and_cache, daemon=True).start()
+    fallback = outlook_gen._fallback()
+    fallback["live_prices"] = {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "source": "yfinance", "assets": {},
+        "summary": {"live": 0, "delayed": 0, "stale": 0, "missing": 0},
+    }
+    return jsonify(fallback)
 
 
 @app.route("/api/outlook/track-record")
@@ -217,35 +293,53 @@ def api_resolved():
     Resolved Context endpoint — settled high-volume markets with Claude
     explanations of what happened and live descendant markets to watch.
 
-    Response is cached in the DB for 30 minutes to avoid 6 sequential
-    blocking Claude calls on every cold start or new request.
+    Uses stale-while-revalidate: serves cached data instantly, refreshes
+    in background.  First-ever request returns an empty shell.
     """
+    import threading
+
+    def _empty_payload():
+        return {
+            "cards":        [],
+            "total":        0,
+            "claude_active": _claude_active,
+            "server_time":  datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _compute_and_cache():
+        try:
+            cards = story_gen.generate_resolved_context(db, limit=6)
+            payload = {
+                "cards":        cards,
+                "total":        len(cards),
+                "claude_active": _claude_active,
+                "server_time":  datetime.now(timezone.utc).isoformat(),
+            }
+            db.set_state("api_resolved_cache", {
+                "ts":   datetime.now(timezone.utc).isoformat(),
+                "data": payload,
+            })
+        except Exception as exc:
+            logger.debug(f"Resolved cache refresh failed: {exc}")
+
     cached = db.get_state("api_resolved_cache", default=None)
     if cached:
         try:
             ts = datetime.fromisoformat(cached["ts"])
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            if (datetime.now(timezone.utc) - ts).total_seconds() < _RESOLVED_CACHE_TTL:
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age < _RESOLVED_CACHE_TTL:
                 return jsonify(cached["data"])
+            # Stale — serve stale data, refresh in background
+            threading.Thread(target=_compute_and_cache, daemon=True).start()
+            return jsonify(cached["data"])
         except Exception:
             pass
 
-    cards = story_gen.generate_resolved_context(db, limit=6)
-    payload = {
-        "cards":        cards,
-        "total":        len(cards),
-        "claude_active": _claude_active,
-        "server_time":  datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        db.set_state("api_resolved_cache", {
-            "ts":   datetime.now(timezone.utc).isoformat(),
-            "data": payload,
-        })
-    except Exception:
-        pass
-    return jsonify(payload)
+    # No cache at all — return empty shell, compute in background
+    threading.Thread(target=_compute_and_cache, daemon=True).start()
+    return jsonify(_empty_payload())
 
 
 @app.route("/api/feed")
