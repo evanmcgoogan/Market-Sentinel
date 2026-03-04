@@ -150,6 +150,55 @@ def eval_dashboard():
 _WHALES_CACHE_TTL = 300  # 5 minutes — whale scans are expensive
 
 
+@app.route("/api/debug/cache")
+def api_debug_cache():
+    """Temporary diagnostic endpoint — shows cache state for all slow endpoints."""
+    import traceback as _tb
+
+    results = {}
+    for key in ("api_feed_cache", "api_whales_cache", "api_resolved_cache", "api_outlook_cache"):
+        try:
+            cached = db.get_state(key, default=None)
+            if cached and isinstance(cached, dict):
+                ts = cached.get("ts", "?")
+                data = cached.get("data", {})
+                # Summarise the payload size without dumping everything
+                if isinstance(data, dict):
+                    summary = {k: type(v).__name__ + (f"[{len(v)}]" if isinstance(v, (list, dict)) else "")
+                               for k, v in data.items()}
+                else:
+                    summary = str(type(data))
+                results[key] = {"ts": ts, "summary": summary}
+            else:
+                results[key] = None
+        except Exception as exc:
+            results[key] = {"error": str(exc)}
+
+    # Also try a quick smoke-test of each computation to expose errors
+    errors = {}
+    for label, fn in [
+        ("resolved_db_query", lambda: len(db.get_resolved_context_markets(limit=2))),
+        ("whales_db_query",   lambda: len(db.get_recent_alerts_feed(hours=24, limit=5))),
+        ("top_volume_query",  lambda: len(db.get_top_volume_markets(limit=5, hours=2))),
+    ]:
+        try:
+            errors[label] = {"ok": True, "rows": fn()}
+        except Exception as exc:
+            errors[label] = {"ok": False, "error": str(exc), "tb": _tb.format_exc()[-500:]}
+
+    # Read any errors stored by background threads
+    bg_errors = {}
+    for key in ("_debug_whales_error", "_debug_resolved_error", "_debug_outlook_error"):
+        try:
+            val = db.get_state(key, default=None)
+            if val:
+                bg_errors[key] = val
+        except Exception:
+            pass
+
+    return jsonify({"caches": results, "smoke_tests": errors, "bg_errors": bg_errors, "claude_active": _claude_active})
+
+
 @app.route("/api/whales")
 def api_whales():
     """
@@ -189,7 +238,9 @@ def api_whales():
                 "data": payload,
             })
         except Exception as exc:
-            logger.debug(f"Whales cache refresh failed: {exc}")
+            import traceback; logger.error(f"Whales cache refresh failed: {exc}")
+            try: db.set_state("_debug_whales_error", {"error": str(exc), "tb": traceback.format_exc()[-800:], "ts": datetime.now(timezone.utc).isoformat()})
+            except Exception: pass
 
     cached = db.get_state("api_whales_cache", default=None)
     if cached:
@@ -245,7 +296,9 @@ def api_outlook():
                 "data": data,
             })
         except Exception as exc:
-            logger.debug(f"Outlook cache refresh failed: {exc}")
+            import traceback; logger.error(f"Outlook cache refresh failed: {exc}")
+            try: db.set_state("_debug_outlook_error", {"error": str(exc), "tb": traceback.format_exc()[-800:], "ts": datetime.now(timezone.utc).isoformat()})
+            except Exception: pass
 
     cached = db.get_state("api_outlook_cache", default=None)
     if cached and not force:
@@ -320,7 +373,9 @@ def api_resolved():
                 "data": payload,
             })
         except Exception as exc:
-            logger.debug(f"Resolved cache refresh failed: {exc}")
+            import traceback; logger.error(f"Resolved cache refresh failed: {exc}")
+            try: db.set_state("_debug_resolved_error", {"error": str(exc), "tb": traceback.format_exc()[-800:], "ts": datetime.now(timezone.utc).isoformat()})
+            except Exception: pass
 
     cached = db.get_state("api_resolved_cache", default=None)
     if cached:
