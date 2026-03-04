@@ -92,43 +92,6 @@ _EVAL_FORCE_COOLDOWN_SECONDS = 300  # 5 minutes
 _FEED_CACHE_TTL = 60  # seconds — JS polls every 30s so max staleness is ~90s
 
 
-def _warm_feed_cache() -> None:
-    """
-    Build the feed payload once in a background thread so the very first
-    browser request is served from cache rather than triggering a live
-    Claude + DB computation.  Called at module load (with --preload this
-    runs in the gunicorn master before workers fork, so the DB-backed
-    headline cache is already warm).
-    """
-    import threading
-
-    def _run():
-        try:
-            logger.info("Pre-warming /api/feed cache…")
-            stories = story_gen.generate_stories(db, hours=24, limit=40)
-            radar   = story_gen.generate_radar(db, hours=24, limit=20)
-            stats   = db.get_system_stats()
-            payload = {
-                "stories":       _attach_sparklines(stories),
-                "radar":         _attach_sparklines(radar),
-                "stats":         stats,
-                "claude_active": _claude_active,
-                "server_time":   datetime.now(timezone.utc).isoformat(),
-            }
-            db.set_state("api_feed_cache", {
-                "ts":   datetime.now(timezone.utc).isoformat(),
-                "data": payload,
-            })
-            logger.info("Feed cache pre-warm complete.")
-        except Exception as exc:
-            logger.debug(f"Feed pre-warm failed (non-fatal): {exc}")
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-_warm_feed_cache()
-
-
 def _attach_sparklines(items: List[Any]) -> List[Dict]:
     """
     Convert story/cluster objects to dicts and attach sparkline history.
