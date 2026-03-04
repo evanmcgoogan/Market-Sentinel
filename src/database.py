@@ -2073,40 +2073,43 @@ class Database:
         cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
+            # CTE with window functions: single scan replaces two correlated
+            # subqueries (MAX/MIN timestamp per market).  FIRST_VALUE ordered
+            # DESC gives the newest snapshot; ordered ASC gives the oldest —
+            # both derived in one pass.  O(N log N) vs the previous O(N²).
             rows = conn.execute("""
+                WITH bounds AS (
+                    SELECT
+                        platform,
+                        market_id,
+                        FIRST_VALUE(market_name) OVER w_desc  AS market_name,
+                        FIRST_VALUE(probability) OVER w_desc  AS latest_prob,
+                        FIRST_VALUE(probability) OVER w_asc   AS oldest_prob,
+                        FIRST_VALUE(volume_24h)  OVER w_desc  AS volume_24h,
+                        FIRST_VALUE(timestamp)   OVER w_desc  AS latest_ts,
+                        ROW_NUMBER()             OVER w_desc  AS rn
+                    FROM market_snapshots
+                    WHERE timestamp > ?
+                    WINDOW
+                        w_desc AS (PARTITION BY platform, market_id ORDER BY timestamp DESC),
+                        w_asc  AS (PARTITION BY platform, market_id ORDER BY timestamp ASC)
+                )
                 SELECT
-                    m1.platform,
-                    m1.market_id,
-                    m1.market_name,
-                    m1.probability      AS latest_prob,
-                    m2.probability      AS oldest_prob,
-                    m1.probability - m2.probability AS change,
-                    ABS(m1.probability - m2.probability) AS abs_change,
-                    m1.volume_24h,
-                    m1.timestamp        AS latest_ts
-                FROM market_snapshots m1
-                JOIN market_snapshots m2
-                    ON  m1.platform  = m2.platform
-                    AND m1.market_id = m2.market_id
-                WHERE m1.timestamp = (
-                    SELECT MAX(ms.timestamp)
-                    FROM market_snapshots ms
-                    WHERE ms.platform  = m1.platform
-                      AND ms.market_id = m1.market_id
-                      AND ms.timestamp > ?
-                )
-                AND m2.timestamp = (
-                    SELECT MIN(ms.timestamp)
-                    FROM market_snapshots ms
-                    WHERE ms.platform  = m2.platform
-                      AND ms.market_id = m2.market_id
-                      AND ms.timestamp > ?
-                )
-                AND ABS(m1.probability - m2.probability) >= ?
-                GROUP BY m1.platform, m1.market_id
+                    platform,
+                    market_id,
+                    market_name,
+                    latest_prob,
+                    oldest_prob,
+                    latest_prob - oldest_prob        AS change,
+                    ABS(latest_prob - oldest_prob)   AS abs_change,
+                    volume_24h,
+                    latest_ts
+                FROM bounds
+                WHERE rn = 1
+                  AND ABS(latest_prob - oldest_prob) >= ?
                 ORDER BY abs_change DESC
                 LIMIT ?
-            """, (cutoff, cutoff, min_change, limit)).fetchall()
+            """, (cutoff, min_change, limit)).fetchall()
 
         return [dict(row) for row in rows]
 
@@ -2159,27 +2162,38 @@ class Database:
         cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
+            # CTE with window function: single scan, no correlated subquery.
+            # ROW_NUMBER picks the newest snapshot per (platform, market_id)
+            # within the time window — O(N log N) vs the previous O(N²).
             rows = conn.execute("""
+                WITH latest AS (
+                    SELECT
+                        platform,
+                        market_id,
+                        market_name,
+                        probability  AS latest_prob,
+                        volume_24h,
+                        timestamp    AS latest_ts,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY platform, market_id
+                            ORDER BY timestamp DESC
+                        ) AS rn
+                    FROM market_snapshots
+                    WHERE timestamp > ?
+                )
                 SELECT
                     platform,
                     market_id,
                     market_name,
-                    probability AS latest_prob,
-                    probability AS oldest_prob,
+                    latest_prob,
+                    latest_prob AS oldest_prob,
                     0.0         AS change,
                     0.0         AS abs_change,
                     volume_24h,
-                    timestamp   AS latest_ts
-                FROM market_snapshots
-                WHERE timestamp = (
-                    SELECT MAX(ms.timestamp)
-                    FROM market_snapshots ms
-                    WHERE ms.platform  = market_snapshots.platform
-                      AND ms.market_id = market_snapshots.market_id
-                      AND ms.timestamp > ?
-                )
-                AND volume_24h > 0
-                GROUP BY platform, market_id
+                    latest_ts
+                FROM latest
+                WHERE rn = 1
+                  AND volume_24h > 0
                 ORDER BY volume_24h DESC
                 LIMIT ?
             """, (cutoff, limit)).fetchall()

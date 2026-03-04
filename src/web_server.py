@@ -88,6 +88,46 @@ if _claude_active:
 _eval_force_last: Optional[datetime] = None
 _EVAL_FORCE_COOLDOWN_SECONDS = 300  # 5 minutes
 
+# Feed cache: avoids re-running generate_stories on every 30-second poll.
+_FEED_CACHE_TTL = 60  # seconds — JS polls every 30s so max staleness is ~90s
+
+
+def _warm_feed_cache() -> None:
+    """
+    Build the feed payload once in a background thread so the very first
+    browser request is served from cache rather than triggering a live
+    Claude + DB computation.  Called at module load (with --preload this
+    runs in the gunicorn master before workers fork, so the DB-backed
+    headline cache is already warm).
+    """
+    import threading
+
+    def _run():
+        try:
+            logger.info("Pre-warming /api/feed cache…")
+            stories = story_gen.generate_stories(db, hours=24, limit=40)
+            radar   = story_gen.generate_radar(db, hours=24, limit=20)
+            stats   = db.get_system_stats()
+            payload = {
+                "stories":       _attach_sparklines(stories),
+                "radar":         _attach_sparklines(radar),
+                "stats":         stats,
+                "claude_active": _claude_active,
+                "server_time":   datetime.now(timezone.utc).isoformat(),
+            }
+            db.set_state("api_feed_cache", {
+                "ts":   datetime.now(timezone.utc).isoformat(),
+                "data": payload,
+            })
+            logger.info("Feed cache pre-warm complete.")
+        except Exception as exc:
+            logger.debug(f"Feed pre-warm failed (non-fatal): {exc}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+_warm_feed_cache()
+
 
 def _attach_sparklines(items: List[Any]) -> List[Dict]:
     """
@@ -250,18 +290,63 @@ def api_feed():
     """
     Primary API endpoint — returns stories, radar items, and system stats.
     Polled by the dashboard JS every 30 seconds.
+
+    Responses are cached in the DB state table for _FEED_CACHE_TTL seconds.
+    A background thread refreshes the cache so callers never wait on live
+    Claude / DB computation.
     """
+    import threading
+
+    # ── Serve from cache if fresh ─────────────────────────────────────────
+    cached = db.get_state("api_feed_cache", default=None)
+    if cached:
+        try:
+            ts = datetime.fromisoformat(cached["ts"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age < _FEED_CACHE_TTL:
+                return jsonify(cached["data"])
+            # Cache stale — serve stale data immediately while refreshing in bg
+            def _refresh():
+                try:
+                    stories = story_gen.generate_stories(db, hours=24, limit=40)
+                    radar   = story_gen.generate_radar(db, hours=24, limit=20)
+                    stats   = db.get_system_stats()
+                    payload = {
+                        "stories":       _attach_sparklines(stories),
+                        "radar":         _attach_sparklines(radar),
+                        "stats":         stats,
+                        "claude_active": _claude_active,
+                        "server_time":   datetime.now(timezone.utc).isoformat(),
+                    }
+                    db.set_state("api_feed_cache", {
+                        "ts":   datetime.now(timezone.utc).isoformat(),
+                        "data": payload,
+                    })
+                except Exception as exc:
+                    logger.debug(f"Feed cache refresh failed: {exc}")
+            threading.Thread(target=_refresh, daemon=True).start()
+            return jsonify(cached["data"])
+        except Exception:
+            pass
+
+    # ── Cache missing (first request after fresh deploy) — compute live ───
     stories = story_gen.generate_stories(db, hours=24, limit=40)
     radar   = story_gen.generate_radar(db, hours=24, limit=20)
     stats   = db.get_system_stats()
-
-    return jsonify({
-        "stories":      _attach_sparklines(stories),
-        "radar":        _attach_sparklines(radar),
-        "stats":        stats,
+    payload = {
+        "stories":       _attach_sparklines(stories),
+        "radar":         _attach_sparklines(radar),
+        "stats":         stats,
         "claude_active": _claude_active,
-        "server_time":  datetime.now(timezone.utc).isoformat(),
+        "server_time":   datetime.now(timezone.utc).isoformat(),
+    }
+    db.set_state("api_feed_cache", {
+        "ts":   datetime.now(timezone.utc).isoformat(),
+        "data": payload,
     })
+    return jsonify(payload)
 
 
 @app.route("/api/stats")
