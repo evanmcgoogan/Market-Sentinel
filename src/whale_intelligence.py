@@ -249,7 +249,7 @@ def _whale_story_from_dict(d: Dict[str, Any]) -> "WhaleStory":
 class PolymarketDataClient:
     """Lightweight sync HTTP client for Polymarket's public Data & Gamma APIs."""
 
-    TIMEOUT = 15
+    TIMEOUT = 8
 
     def __init__(self):
         self._session = requests.Session()
@@ -593,15 +593,15 @@ class WhaleBrain:
         alert_markets = self._get_alert_market_ids(hours=72)
         logger.info(f"WhaleBrain: scanning {len(alert_markets)} alert markets for whale activity")
 
-        for market_id, _name in alert_markets[:25]:
+        for market_id, _name in alert_markets[:15]:
             try:
                 info = self.client.get_market_info(market_id)
                 cid  = info.get("conditionId", "")
                 if not cid:
                     continue
-                for raw in self.client.get_market_trades(cid, limit=300):
+                for raw in self.client.get_market_trades(cid, limit=200):
                     _add(_parse_trade(raw))
-                time.sleep(0.15)
+                time.sleep(0.1)
             except Exception as exc:
                 logger.debug(f"Whale scan error (market {market_id}): {exc}")
 

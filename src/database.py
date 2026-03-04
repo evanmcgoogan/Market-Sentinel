@@ -2124,7 +2124,25 @@ class Database:
         Used to populate the Resolved Context tab.
         """
         with self._get_conn() as conn:
+            # CTE with ROW_NUMBER: single scan replaces the correlated
+            # subquery that previously ran MAX(timestamp) for every row
+            # in the entire (unfiltered!) market_snapshots table — O(N²).
             rows = conn.execute("""
+                WITH latest AS (
+                    SELECT
+                        platform,
+                        market_id,
+                        market_name,
+                        probability,
+                        volume_24h,
+                        end_date,
+                        timestamp AS latest_ts,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY platform, market_id
+                            ORDER BY timestamp DESC
+                        ) AS rn
+                    FROM market_snapshots
+                )
                 SELECT
                     platform,
                     market_id,
@@ -2132,17 +2150,11 @@ class Database:
                     probability,
                     volume_24h,
                     end_date,
-                    timestamp AS latest_ts
-                FROM market_snapshots
-                WHERE timestamp = (
-                    SELECT MAX(ms.timestamp)
-                    FROM market_snapshots ms
-                    WHERE ms.platform  = market_snapshots.platform
-                      AND ms.market_id = market_snapshots.market_id
-                )
-                AND (probability >= 97.0 OR probability <= 3.0)
-                AND volume_24h >= ?
-                GROUP BY platform, market_id
+                    latest_ts
+                FROM latest
+                WHERE rn = 1
+                  AND (probability >= 97.0 OR probability <= 3.0)
+                  AND volume_24h >= ?
                 ORDER BY volume_24h DESC
                 LIMIT ?
             """, (min_volume_24h, limit)).fetchall()

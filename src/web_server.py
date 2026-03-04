@@ -137,9 +137,16 @@ def resolved():
     return render_template("resolved.html")
 
 
-@app.route("/outlook")
-def outlook():
+@app.route("/forecast")
+def forecast():
     return render_template("outlook.html")
+
+
+@app.route("/outlook")
+def outlook_redirect():
+    """Redirect old /outlook URL to /forecast (avoids Chrome Safe Browsing flag)."""
+    from flask import redirect
+    return redirect("/forecast", code=301)
 
 
 @app.route("/eval")
@@ -225,8 +232,13 @@ def api_whales():
         }
 
     def _compute_and_cache():
+        import concurrent.futures
         try:
-            stories = whale_brain.generate_whale_stories(limit=limit)
+            # Run whale discovery with a hard 120s timeout so the thread
+            # doesn't hang forever on Polymarket API slowness.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(whale_brain.generate_whale_stories, limit=limit)
+                stories = future.result(timeout=120)
             payload = {
                 "stories":      [s.to_dict() for s in stories],
                 "total":        len(stories),
@@ -237,6 +249,11 @@ def api_whales():
                 "ts":   datetime.now(timezone.utc).isoformat(),
                 "data": payload,
             })
+            logger.info(f"Whales cache refreshed: {len(stories)} stories")
+        except concurrent.futures.TimeoutError:
+            logger.error("Whales cache refresh timed out after 120s")
+            try: db.set_state("_debug_whales_error", {"error": "Timeout after 120s", "ts": datetime.now(timezone.utc).isoformat()})
+            except Exception: pass
         except Exception as exc:
             import traceback; logger.error(f"Whales cache refresh failed: {exc}")
             try: db.set_state("_debug_whales_error", {"error": str(exc), "tb": traceback.format_exc()[-800:], "ts": datetime.now(timezone.utc).isoformat()})
@@ -265,8 +282,8 @@ def api_whales():
 _OUTLOOK_CACHE_TTL = 600  # 10 minutes — outlook is a large Claude call
 
 
-@app.route("/api/outlook")
-def api_outlook():
+@app.route("/api/forecast")
+def api_forecast():
     """
     Asset price prediction endpoint — Claude Sonnet synthesizes all signals
     into directional predictions with magnitude and confidence scores.
@@ -279,24 +296,38 @@ def api_outlook():
     force = request.args.get("force", "").lower() in ("1", "true", "yes")
 
     def _compute_and_cache():
+        import concurrent.futures
         try:
             if force:
                 outlook_gen.invalidate()
-            data = outlook_gen.generate(db)
-            try:
-                data["live_prices"] = outlook_grader.get_live_price_snapshot()
-            except Exception:
-                data["live_prices"] = {
-                    "captured_at": datetime.now(timezone.utc).isoformat(),
-                    "source": "yfinance", "assets": {},
-                    "summary": {"live": 0, "delayed": 0, "stale": 0, "missing": 0},
-                }
+
+            def _do_compute():
+                d = outlook_gen.generate(db)
+                try:
+                    d["live_prices"] = outlook_grader.get_live_price_snapshot()
+                except Exception:
+                    d["live_prices"] = {
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "yfinance", "assets": {},
+                        "summary": {"live": 0, "delayed": 0, "stale": 0, "missing": 0},
+                    }
+                return d
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_do_compute)
+                data = future.result(timeout=90)
+
             db.set_state("api_outlook_cache", {
                 "ts":   datetime.now(timezone.utc).isoformat(),
                 "data": data,
             })
+            logger.info("Forecast cache refreshed")
+        except concurrent.futures.TimeoutError:
+            logger.error("Forecast cache refresh timed out after 90s")
+            try: db.set_state("_debug_outlook_error", {"error": "Timeout after 90s", "ts": datetime.now(timezone.utc).isoformat()})
+            except Exception: pass
         except Exception as exc:
-            import traceback; logger.error(f"Outlook cache refresh failed: {exc}")
+            import traceback; logger.error(f"Forecast cache refresh failed: {exc}")
             try: db.set_state("_debug_outlook_error", {"error": str(exc), "tb": traceback.format_exc()[-800:], "ts": datetime.now(timezone.utc).isoformat()})
             except Exception: pass
 
@@ -326,8 +357,8 @@ def api_outlook():
     return jsonify(fallback)
 
 
-@app.route("/api/outlook/track-record")
-def api_outlook_track_record():
+@app.route("/api/forecast/track-record")
+def api_forecast_track_record():
     """
     Track Record endpoint — grades past Outlook predictions vs actual prices,
     returns per-asset accuracy stats, grade history, and Claude's reflection.
@@ -360,8 +391,11 @@ def api_resolved():
         }
 
     def _compute_and_cache():
+        import concurrent.futures
         try:
-            cards = story_gen.generate_resolved_context(db, limit=6)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(story_gen.generate_resolved_context, db, limit=6)
+                cards = future.result(timeout=90)
             payload = {
                 "cards":        cards,
                 "total":        len(cards),
@@ -372,6 +406,11 @@ def api_resolved():
                 "ts":   datetime.now(timezone.utc).isoformat(),
                 "data": payload,
             })
+            logger.info(f"Resolved cache refreshed: {len(cards)} cards")
+        except concurrent.futures.TimeoutError:
+            logger.error("Resolved cache refresh timed out after 90s")
+            try: db.set_state("_debug_resolved_error", {"error": "Timeout after 90s", "ts": datetime.now(timezone.utc).isoformat()})
+            except Exception: pass
         except Exception as exc:
             import traceback; logger.error(f"Resolved cache refresh failed: {exc}")
             try: db.set_state("_debug_resolved_error", {"error": str(exc), "tb": traceback.format_exc()[-800:], "ts": datetime.now(timezone.utc).isoformat()})

@@ -140,7 +140,7 @@
       <a href="/" class="nav-tab">Markets</a>
       <a href="/whales" class="nav-tab">Whales</a>
       <a href="/resolved" class="nav-tab">Resolved</a>
-      <a href="/outlook" class="nav-tab">Outlook</a>
+      <a href="/forecast" class="nav-tab">Forecast</a>
       <a href="/eval" class="nav-tab active">Eval</a>
     </div>
   </div>
@@ -399,7 +399,7 @@
 
     async function loadOutlookTrackRecord() {
       try {
-        const res = await fetch('/api/outlook/track-record');
+        const res = await fetch('/api/forecast/track-record');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         renderOutlookTrackRecord(data);

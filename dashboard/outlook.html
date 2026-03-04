@@ -528,9 +528,9 @@
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
       Resolved
     </a>
-    <a href="/outlook" class="nav-tab active">
+    <a href="/forecast" class="nav-tab active">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-      Outlook
+      Forecast
     </a>
     <a href="/eval" class="nav-tab">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="4" y1="19" x2="4" y2="5"/><line x1="10" y1="19" x2="10" y2="11"/><line x1="16" y1="19" x2="16" y2="8"/><line x1="22" y1="19" x2="22" y2="13"/></svg>
@@ -544,7 +544,7 @@
 
   <!-- Evaluation nav -->
   <div class="sub-nav">
-    <a class="sub-tab active" href="/outlook">
+    <a class="sub-tab active" href="/forecast">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
       Predictions
     </a>
@@ -833,7 +833,7 @@ async function forceRefresh() {
 // ── Load data ────────────────────────────────────────────────────────────
 async function load(force = false) {
   try {
-    const url = '/api/outlook' + (force ? '?force=1' : '');
+    const url = '/api/forecast' + (force ? '?force=1' : '');
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
