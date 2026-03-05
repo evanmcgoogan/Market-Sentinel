@@ -89,30 +89,16 @@ class TestReliabilityAndFeedback(unittest.TestCase):
         signal_types = {s.signal_type for s in signals}
         self.assertIn("no_news_move", signal_types)
 
-    def test_whale_activity_uses_win_rate_and_global_fallback(self):
+    def test_whale_tracker_stub_returns_empty(self):
+        """WhaleTracker is now a no-op stub — all whale logic lives in WhaleBrain."""
         cfg = WhaleConfig()
         tracker = WhaleTracker(cfg, self.db)
 
-        self.db.upsert_whale_wallet(
-            address="0xabc",
-            total_trades=20,
-            winning_trades=16,  # 80%
-            total_volume=200000.0,
-            is_whale=True,
-        )
-        self.db.save_whale_trade(
-            address="0xabc",
-            market_id=GLOBAL_WHALE_MARKET_ID,
-            direction="buy_yes",
-            amount=10000.0,
-            price=0.62,
-            tx_hash="0xtx1",
-            market_name="Global flow",
-        )
-
-        activity = tracker.get_recent_whale_activity("unmapped-market", minutes=120)
-        self.assertTrue(activity["has_whale_activity"])
-        self.assertEqual(activity["smart_money_trades"], 1)
+        activity = tracker.get_recent_whale_activity("any-market", minutes=120)
+        self.assertFalse(activity["has_whale_activity"])
+        self.assertEqual(activity["trade_count"], 0)
+        self.assertEqual(activity["total_volume"], 0.0)
+        self.assertEqual(activity["smart_money_trades"], 0)
 
     def test_compaction_strategy_runs(self):
         called = {"compact": False}

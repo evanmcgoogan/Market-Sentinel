@@ -177,7 +177,7 @@ def eval_dashboard():
     return render_template("eval.html")
 
 
-_WHALES_CACHE_TTL = 300  # 5 minutes — whale scans are expensive
+_WHALES_CACHE_TTL = 600  # 10 minutes — matches whale_intelligence.py CACHE_TTL
 
 
 @app.route("/api/debug/cache")
@@ -248,8 +248,16 @@ def api_whales():
 
     def _empty_payload():
         return {
-            "stories":      [],
-            "total":        0,
+            "market_flows":   [],
+            "whale_profiles": [],
+            "recent_trades":  [],
+            "stats": {
+                "total_whales":      0,
+                "total_flow_volume": 0,
+                "top_insider_score": 0,
+                "markets_with_flow": 0,
+                "trades_scanned":    0,
+            },
             "claude_active": _claude_active,
             "server_time":  datetime.now(timezone.utc).isoformat(),
         }
@@ -260,19 +268,15 @@ def api_whales():
             # Run whale discovery with a hard 120s timeout so the thread
             # doesn't hang forever on Polymarket API slowness.
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(whale_brain.generate_whale_stories, limit=limit)
-                stories = future.result(timeout=120)
-            payload = {
-                "stories":      [s.to_dict() for s in stories],
-                "total":        len(stories),
-                "claude_active": _claude_active,
-                "server_time":  datetime.now(timezone.utc).isoformat(),
-            }
+                future = pool.submit(whale_brain.generate_whale_intelligence, limit=limit)
+                payload = future.result(timeout=120)
             db.set_state("api_whales_cache", {
                 "ts":   datetime.now(timezone.utc).isoformat(),
                 "data": payload,
             })
-            logger.info(f"Whales cache refreshed: {len(stories)} stories")
+            n_profiles = len(payload.get("whale_profiles", []))
+            n_flows = len(payload.get("market_flows", []))
+            logger.info(f"Whales cache refreshed: {n_profiles} profiles, {n_flows} market flows")
         except concurrent.futures.TimeoutError:
             logger.error("Whales cache refresh timed out after 120s")
             try: db.set_state("_debug_whales_error", {"error": "Timeout after 120s", "ts": datetime.now(timezone.utc).isoformat()})

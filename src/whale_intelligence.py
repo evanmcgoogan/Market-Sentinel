@@ -2,22 +2,26 @@
 Whale Intelligence — tracks large prediction market traders and generates
 Claude-powered intelligence profiles.
 
-Primary data source: Polymarket Data API (free, public, no auth required)
-  https://data-api.polymarket.com
+Architecture: Single-pipeline discovery via Polymarket Data API.
+  1. Fetch 500 most recent global trades (one API call, always has data)
+  2. Filter + parse: $1K+ for trade feed, $5K+ for whale profiling
+  3. Aggregate by market → Smart Money Flow
+  4. Group by wallet → Top whale wallets
+  5. Fetch wallet histories (parallel, 4 threads)
+  6. Score + rank → Insider scoring
+  7. Claude Haiku briefs for top wallets
 
-A "whale" is a wallet that makes large ($5 000+) trades on prediction markets.
-We find them by scanning the markets that have already triggered alerts in our
-DB (highest signal relevance), then build full trading profiles and ask Claude
-to write a three-section brief for each:
-
-  • THE WALLET — who is this entity and what's their information edge?
-  • THE TRADE  — what did they just do and why does it matter?
-  • THE ANGLE  — could they be an insider? what's the narrative?
+Three intelligence products:
+  • Smart Money Flow — what markets are big traders moving on
+  • Whale Profiles  — who are the biggest traders, what they're doing
+  • Recent Large Trades — real-time feed of $1K+ trades
 """
 
+import concurrent.futures
 import json
 import logging
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any, Tuple
@@ -27,38 +31,22 @@ import requests
 logger = logging.getLogger(__name__)
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
-POLY_DATA_API  = "https://data-api.polymarket.com"
-POLY_GAMMA_API = "https://gamma-api.polymarket.com"
+POLY_DATA_API = "https://data-api.polymarket.com"
 
-# Minimum USD value of a single trade to be considered whale activity
-MIN_WHALE_TRADE_USDC = 5_000
+# Trade size thresholds (USD)
+MIN_TRADE_FEED = 1_000      # Minimum for the recent trades feed + market flows
+MIN_WHALE_TRADE = 5_000     # Minimum for whale wallet profiling
 
-# Cache TTL for the full stories list (seconds)
-CACHE_TTL = 300  # 5 minutes
+# Cache TTL for the full intelligence payload (seconds)
+CACHE_TTL = 600  # 10 minutes — whale positions don't change every 5 min
 
-# Keyword fragments that identify markets to exclude from whale discovery:
-# high-frequency crypto binaries (bot-dominated) and sports (not insider-relevant)
+# Keyword fragments identifying bot-dominated markets to exclude.
+# Intentionally SHORT: we only filter crypto binary bots and weather noise.
+# Sports, entertainment, and other "real event" markets stay in — large trades
+# on those markets are genuinely interesting whale activity.
 _EXCLUDE_TITLE = [
-    # High-freq crypto binary bots
-    "up or down", "bitcoin up", "eth up", "btc up",
+    "up or down", "bitcoin up", "eth up", "btc up", "sol up",
     " 5m", " 15m", " 1h ", "will it rain", "weather forecast",
-    # Sports leagues and tournaments (not intelligence-relevant)
-    "premier league", "la liga", "serie a", "bundesliga", "ligue 1",
-    "champions league", "europa league", "fa cup", "super bowl",
-    "nfl", "nba", "mlb", "nhl", " ufc ", "formula 1", "grand prix",
-    "wimbledon", "world cup", "win the title", "win the league",
-    "win the cup", "ballon d'or", "golden boot",
-    # Sports clubs (European football dominates prediction market volumes)
-    "barcelona", "real madrid", "manchester city", "manchester united",
-    "liverpool", "arsenal", "chelsea", "tottenham", "atletico",
-    "juventus", "inter milan", "ac milan", "napoli", "roma",
-    "bayern", "borussia dortmund", "bayer leverkusen",
-    "paris saint-germain", "ajax",
-    # Generic sports team win/lose markets
-    "vs.", " vs ", "bucks vs", "lakers vs", "celtics vs",
-    # Entertainment / reality / celebrity
-    "oscar", "grammy", "emmy", "box office", "kardashian",
-    "taylor swift", "beyonce", "reality tv", "bachelor",
 ]
 
 
@@ -99,6 +87,22 @@ class WhaleTrade:
     @property
     def direction_label(self) -> str:
         return f"{self.side.title()} {self.outcome}"
+
+    def to_feed_dict(self) -> Dict:
+        """Compact dict for the recent-trades feed."""
+        return {
+            "address":       self.address,
+            "short_address": f"{self.address[:6]}…{self.address[-4:]}",
+            "pseudonym":     self.pseudonym,
+            "market_name":   self.market_name,
+            "side":          self.side,
+            "outcome":       self.outcome,
+            "usd_value":     round(self.usd_value, 2),
+            "implied_prob":  round(self.implied_prob * 100, 1),
+            "relative_time": self.relative_time,
+            "tx_hash":       self.tx_hash,
+            "direction_label": self.direction_label,
+        }
 
 
 @dataclass
@@ -189,10 +193,7 @@ class WhaleStory:
 
 
 def _whale_story_from_dict(d: Dict[str, Any]) -> "WhaleStory":
-    """Reconstruct a WhaleStory shell from a cached to_dict() payload.
-    Used when loading 24h-old stories from the DB — we only need the fields
-    the dashboard renders, so we stub the profile/trade objects minimally.
-    """
+    """Reconstruct a WhaleStory shell from a cached to_dict() payload."""
     ft_raw = d.get("featured_trade") or {}
     ts_str = ft_raw.get("timestamp") or datetime.now(timezone.utc).isoformat()
     try:
@@ -244,10 +245,63 @@ def _whale_story_from_dict(d: Dict[str, Any]) -> "WhaleStory":
     )
 
 
+# ── Smart Money Flow dataclass ────────────────────────────────────────────────
+
+@dataclass
+class MarketFlow:
+    """Aggregated smart money flow for a single prediction market."""
+    condition_id:   str
+    market_name:    str
+    total_flow:     float       # sum of all USD values
+    buy_flow:       float
+    sell_flow:      float
+    trade_count:    int
+    unique_wallets: int
+    top_trade:      Optional[WhaleTrade] = None
+
+    @property
+    def net_direction(self) -> str:
+        return "BUY" if self.buy_flow >= self.sell_flow else "SELL"
+
+    @property
+    def net_pct(self) -> float:
+        """Percentage of flow that is buys (0–100)."""
+        total = self.buy_flow + self.sell_flow
+        if total == 0:
+            return 50.0
+        return round(100.0 * self.buy_flow / total, 1)
+
+    def to_dict(self) -> Dict:
+        top = None
+        if self.top_trade:
+            top = {
+                "address":       self.top_trade.address,
+                "short_address": f"{self.top_trade.address[:6]}…{self.top_trade.address[-4:]}",
+                "pseudonym":     self.top_trade.pseudonym,
+                "side":          self.top_trade.side,
+                "outcome":       self.top_trade.outcome,
+                "usd_value":     round(self.top_trade.usd_value, 2),
+                "implied_prob":  round(self.top_trade.implied_prob * 100, 1),
+                "relative_time": self.top_trade.relative_time,
+            }
+        return {
+            "condition_id":   self.condition_id,
+            "market_name":    self.market_name,
+            "total_flow":     round(self.total_flow, 2),
+            "buy_flow":       round(self.buy_flow, 2),
+            "sell_flow":      round(self.sell_flow, 2),
+            "net_direction":  self.net_direction,
+            "net_pct":        self.net_pct,
+            "trade_count":    self.trade_count,
+            "unique_wallets": self.unique_wallets,
+            "top_trade":      top,
+        }
+
+
 # ── Polymarket Data API client ────────────────────────────────────────────────
 
 class PolymarketDataClient:
-    """Lightweight sync HTTP client for Polymarket's public Data & Gamma APIs."""
+    """Lightweight sync HTTP client for Polymarket's public Data API."""
 
     TIMEOUT = 8
 
@@ -275,20 +329,13 @@ class PolymarketDataClient:
         data = self._get(f"{POLY_DATA_API}/trades", {"market": condition_id, "limit": limit})
         return data if isinstance(data, list) else []
 
-    def get_wallet_trades(self, address: str, limit: int = 300) -> List[Dict]:
+    def get_wallet_trades(self, address: str, limit: int = 200) -> List[Dict]:
         """Full trade history for a wallet address (proxy wallet)."""
         data = self._get(
             f"{POLY_DATA_API}/trades",
             {"user": address.lower(), "limit": limit},
         )
         return data if isinstance(data, list) else []
-
-    def get_market_info(self, market_id: str) -> Dict:
-        """Fetch market metadata (conditionId, prices) by Polymarket numeric ID."""
-        data = self._get(f"{POLY_GAMMA_API}/markets", {"id": market_id})
-        if isinstance(data, list) and data:
-            return data[0]
-        return {}
 
 
 # ── Parse raw API dict → WhaleTrade ──────────────────────────────────────────
@@ -305,7 +352,6 @@ def _parse_trade(raw: Dict) -> Optional[WhaleTrade]:
         if size <= 0 or price <= 0:
             return None
 
-        # Exclude high-frequency crypto binary markets
         title = (raw.get("title") or "").strip()
         if not title:
             return None
@@ -418,6 +464,11 @@ def _calc_insider_score(
     if profile.pseudonym:
         score += 4
 
+    # ── Multi-market alignment (same wallet active on 3+ markets in batch)
+    if profile.unique_markets >= 3 and profile.total_trades >= 5:
+        score += 5
+        signals.append(f"Multi-market player: active on {profile.unique_markets} markets")
+
     return min(score, 100.0), signals
 
 
@@ -425,14 +476,11 @@ def _calc_insider_score(
 
 class WhaleBrain:
     """
-    Orchestrates whale discovery, profiling, and Claude story generation.
+    Single-pipeline whale discovery via Polymarket Data API.
 
-    Discovery strategy (in order of relevance):
-      1. Scan alert_history markets from our DB — these are the markets
-         that already showed unusual movement; whale trades here are most
-         likely to be connected to insider information.
-      2. Fall back to the global Polymarket trade stream and filter for
-         large trades on real-world events (not crypto binary bots).
+    One API call to fetch global trades → parse → aggregate flows →
+    identify top wallets → fetch histories → score → Claude briefs.
+    No dependencies on alert_history, Gamma API, or blockchain RPC.
     """
 
     def __init__(self, api_key: str = "", db=None):
@@ -440,8 +488,8 @@ class WhaleBrain:
         self.db      = db
         self.client  = PolymarketDataClient()
 
-        self._cache:      Optional[List[WhaleStory]] = None
-        self._cache_time: Optional[datetime]         = None
+        self._cache:      Optional[Dict] = None
+        self._cache_time: Optional[datetime] = None
 
         self._claude = None
         if api_key:
@@ -454,14 +502,17 @@ class WhaleBrain:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def generate_whale_stories(self, limit: int = 10) -> List["WhaleStory"]:
+    def generate_whale_intelligence(self, limit: int = 10) -> Dict:
         """
-        Main entry point.  Returns up to `limit` WhaleStory objects.
+        Main entry point.  Returns a structured intelligence payload with:
+          - market_flows:   top markets by smart money volume
+          - whale_profiles: top wallets with Claude stories
+          - recent_trades:  chronological feed of $1K+ trades
+          - stats:          aggregate metrics
+          - claude_active:  whether Claude is available
 
-        Fresh stories are computed every CACHE_TTL seconds and persisted to
-        the DB.  Between refreshes — and on the Whales tab — we merge the
-        fresh results with any stories from the last 24 hours so interesting
-        whale activity stays visible even after the cache expires.
+        Results are cached for CACHE_TTL seconds.  Between refreshes we
+        also merge with DB-persisted whale stories for 24h retention.
         """
         now = datetime.now(timezone.utc)
         cache_stale = (
@@ -470,11 +521,8 @@ class WhaleBrain:
             or (now - self._cache_time).total_seconds() >= CACHE_TTL
         )
 
+        # DB warmup: on first request after restart, load persisted stories
         if cache_stale and self.db:
-            # Before triggering the 60-90s _compute scan, check whether the DB
-            # already has stories fresh enough to satisfy the TTL.  This means
-            # the first request after a process restart returns instantly using
-            # the DB-persisted result from the previous run.
             try:
                 db_rows = self.db.get_recent_whale_stories(hours=1)
                 if db_rows:
@@ -484,174 +532,219 @@ class WhaleBrain:
                         if latest_ts.tzinfo is None:
                             latest_ts = latest_ts.replace(tzinfo=timezone.utc)
                         if (now - latest_ts).total_seconds() < CACHE_TTL:
-                            self._cache      = [_whale_story_from_dict(r) for r in db_rows]
+                            # Build a quick payload from cached stories
+                            cached_stories = [_whale_story_from_dict(r) for r in db_rows]
+                            self._cache = self._build_payload_from_stories(cached_stories, [], [])
                             self._cache_time = latest_ts
                             cache_stale = False
                             logger.info(
-                                f"WhaleBrain: warmed cache from DB "
-                                f"({len(self._cache)} stories, {(now - latest_ts).total_seconds():.0f}s old)"
+                                f"WhaleBrain: warmed from DB ({len(cached_stories)} stories, "
+                                f"{(now - latest_ts).total_seconds():.0f}s old)"
                             )
             except Exception as exc:
                 logger.debug(f"WhaleBrain DB warmup error: {exc}")
 
         if cache_stale:
             try:
-                fresh = self._compute(limit * 2)
+                payload = self._compute_intelligence(limit)
             except Exception as exc:
-                logger.error(f"WhaleBrain._compute error: {exc}", exc_info=True)
-                fresh = []
+                logger.error(f"WhaleBrain._compute_intelligence error: {exc}", exc_info=True)
+                payload = self._empty_payload()
 
-            # Persist fresh stories to DB for 24h retention
-            if self.db and fresh:
+            # Persist whale stories to DB for 24h retention
+            if self.db:
                 try:
                     self.db.purge_old_whale_stories(hours=24)
-                    for s in fresh:
+                    for p in payload.get("whale_profiles", []):
                         self.db.save_whale_story(
-                            address=s.profile.address,
-                            condition_id=s.featured_trade.condition_id or "",
-                            story_dict=s.to_dict(),
-                            insider_score=s.insider_score,
+                            address=p.get("address", ""),
+                            condition_id=(p.get("featured_trade") or {}).get("condition_id", ""),
+                            story_dict=p,
+                            insider_score=p.get("insider_score", 0),
                         )
                 except Exception as exc:
                     logger.debug(f"Whale DB persist error: {exc}")
 
-            self._cache      = fresh
+            self._cache      = payload
             self._cache_time = now
 
-        # Merge in-memory fresh stories with 24h DB cache
-        merged_dicts: Dict[str, "WhaleStory"] = {}
-        for s in (self._cache or []):
-            key = f"{s.profile.address}:{s.featured_trade.condition_id}"
-            merged_dicts[key] = s
+        result = dict(self._cache or self._empty_payload())
 
-        # Pull cached stories from DB that aren't already in-memory
+        # Merge DB-cached whale stories for 24h retention
         if self.db:
             try:
-                cached_rows = self.db.get_recent_whale_stories(hours=24)
-                for row in cached_rows:
-                    key = f"{row.get('address','')}:{row.get('featured_trade',{}).get('condition_id','')}"
-                    if key not in merged_dicts:
-                        merged_dicts[key] = _whale_story_from_dict(row)
-            except Exception as exc:
-                logger.debug(f"Whale DB load error: {exc}")
+                db_rows = self.db.get_recent_whale_stories(hours=24)
+                existing_addrs = {p.get("address", "") for p in result.get("whale_profiles", [])}
+                for row in db_rows:
+                    addr = row.get("address", "")
+                    if addr and addr not in existing_addrs:
+                        story = _whale_story_from_dict(row)
+                        result["whale_profiles"].append(story.to_dict())
+                        existing_addrs.add(addr)
+            except Exception:
+                pass
 
-        merged = sorted(merged_dicts.values(), key=lambda s: s.insider_score, reverse=True)
-        return merged[:limit]
+        # Sort profiles by score and trim
+        result["whale_profiles"] = sorted(
+            result.get("whale_profiles", []),
+            key=lambda p: p.get("insider_score", 0),
+            reverse=True,
+        )[:limit]
+
+        result["claude_active"] = self._claude is not None
+        result["server_time"] = now.isoformat()
+
+        return result
+
+    # ── Backward compat — old endpoint still calls this ───────────────────────
+
+    def generate_whale_stories(self, limit: int = 10) -> List["WhaleStory"]:
+        """Legacy entry point.  Returns WhaleStory objects for compatibility."""
+        payload = self.generate_whale_intelligence(limit)
+        return [
+            _whale_story_from_dict(p) for p in payload.get("whale_profiles", [])
+        ]
 
     # ── Internal computation ──────────────────────────────────────────────────
 
-    def _compute(self, limit: int) -> List[WhaleStory]:
-        # 1. Find large trades
-        raw_trades = self._discover_whales()
-        if not raw_trades:
-            logger.info("WhaleBrain: no whale trades discovered")
-            return []
+    def _compute_intelligence(self, limit: int) -> Dict:
+        """Core computation pipeline. ~20-40s wall clock."""
+        start = time.monotonic()
 
-        # 2. Group by wallet → keep all trades per wallet
-        by_wallet: Dict[str, List[WhaleTrade]] = {}
-        for t in raw_trades:
-            by_wallet.setdefault(t.address, []).append(t)
+        # 1. Fetch 500 most recent global trades (ONE API call)
+        raw_trades = self.client.get_recent_trades(limit=500)
+        logger.info(f"WhaleBrain: fetched {len(raw_trades)} raw trades from Data API")
 
-        # 3. Build profiles + score each wallet
+        # 2. Parse all trades
+        all_trades = [_parse_trade(r) for r in raw_trades]
+        all_trades = [t for t in all_trades if t is not None]
+        logger.info(f"WhaleBrain: {len(all_trades)} trades passed parse filter")
+
+        if not all_trades:
+            return self._empty_payload()
+
+        # 3. Split into two tiers
+        feed_trades = [t for t in all_trades if t.usd_value >= MIN_TRADE_FEED]
+        whale_trades = [t for t in all_trades if t.usd_value >= MIN_WHALE_TRADE]
+
+        # 4. Aggregate market flows from feed-tier trades
+        market_flows = self._aggregate_market_flows(feed_trades)
+
+        # 5. Group whale-tier trades by wallet → top wallets
+        by_wallet: Dict[str, List[WhaleTrade]] = defaultdict(list)
+        for t in whale_trades:
+            by_wallet[t.address].append(t)
+
+        # Sort wallets by total volume in this batch
+        wallet_ranking = sorted(
+            by_wallet.items(),
+            key=lambda kv: sum(t.usd_value for t in kv[1]),
+            reverse=True,
+        )[:8]  # Top 8 wallets
+
+        logger.info(
+            f"WhaleBrain: {len(feed_trades)} feed trades, "
+            f"{len(whale_trades)} whale trades, "
+            f"{len(wallet_ranking)} wallets to profile"
+        )
+
+        # 6. Fetch wallet histories (parallel)
+        addresses = [addr for addr, _ in wallet_ranking]
+        wallet_histories = self._fetch_wallet_histories(addresses)
+
+        # 7. Build profiles, score, and rank
         scored: List[Tuple[WhaleProfile, WhaleTrade, float, List[str]]] = []
-        for address, trades in by_wallet.items():
-            profile  = self._build_profile(address, trades)
-            featured = max(trades, key=lambda t: t.usd_value)
+        for address, discovery_trades in wallet_ranking:
+            history_trades = wallet_histories.get(address, [])
+            profile = self._build_profile(address, discovery_trades, history_trades)
+            featured = max(discovery_trades, key=lambda t: t.usd_value)
             score, signals = _calc_insider_score(profile, featured)
             scored.append((profile, featured, score, signals))
 
-        # 4. Sort by insider score — most suspicious first
+        # Sort by insider score
         scored.sort(key=lambda x: x[2], reverse=True)
 
-        # 5. Generate stories for top N
+        # 8. Generate Claude stories for top wallets
         stories: List[WhaleStory] = []
-        for profile, featured, score, signals in scored[:limit]:
+        for profile, featured, score, signals in scored[:min(limit, 6)]:
             story = self._make_story(profile, featured, score, signals)
             stories.append(story)
 
+        # 9. Build recent trades feed (top 20 by USD value, most recent first)
+        recent_feed = sorted(feed_trades, key=lambda t: t.timestamp, reverse=True)[:20]
+
+        elapsed = time.monotonic() - start
         logger.info(
-            f"WhaleBrain: generated {len(stories)} whale stories "
-            f"from {len(by_wallet)} wallets"
+            f"WhaleBrain: generated {len(stories)} stories, "
+            f"{len(market_flows)} market flows in {elapsed:.1f}s"
         )
-        return stories
 
-    def _discover_whales(self) -> List[WhaleTrade]:
-        """Return large trades from alert markets + global feed fallback."""
-        discovered: List[WhaleTrade] = []
-        seen_tx: set = set()
+        return self._build_payload(market_flows, stories, recent_feed)
 
-        def _add(t: Optional[WhaleTrade]):
-            if (
-                t is not None
-                and t.usd_value >= MIN_WHALE_TRADE_USDC
-                and t.tx_hash not in seen_tx
-            ):
-                seen_tx.add(t.tx_hash)
-                discovered.append(t)
+    def _aggregate_market_flows(self, trades: List[WhaleTrade]) -> List[MarketFlow]:
+        """Group trades by conditionId and compute directional flow."""
+        by_market: Dict[str, List[WhaleTrade]] = defaultdict(list)
+        for t in trades:
+            key = t.condition_id or t.market_name
+            by_market[key].append(t)
 
-        # ── Strategy 1: alert_history markets (highest signal relevance)
-        alert_markets = self._get_alert_market_ids(hours=72)
-        logger.info(f"WhaleBrain: scanning {len(alert_markets)} alert markets for whale activity")
+        flows: List[MarketFlow] = []
+        for key, market_trades in by_market.items():
+            buy_flow = sum(t.usd_value for t in market_trades if t.side == "BUY")
+            sell_flow = sum(t.usd_value for t in market_trades if t.side == "SELL")
+            top_trade = max(market_trades, key=lambda t: t.usd_value)
+            wallets = {t.address for t in market_trades}
 
-        for market_id, _name in alert_markets[:15]:
-            try:
-                info = self.client.get_market_info(market_id)
-                cid  = info.get("conditionId", "")
-                if not cid:
-                    continue
-                for raw in self.client.get_market_trades(cid, limit=200):
-                    _add(_parse_trade(raw))
-                time.sleep(0.1)
-            except Exception as exc:
-                logger.debug(f"Whale scan error (market {market_id}): {exc}")
+            flows.append(MarketFlow(
+                condition_id=key,
+                market_name=market_trades[0].market_name,
+                total_flow=buy_flow + sell_flow,
+                buy_flow=buy_flow,
+                sell_flow=sell_flow,
+                trade_count=len(market_trades),
+                unique_wallets=len(wallets),
+                top_trade=top_trade,
+            ))
 
-        # ── Strategy 2: global trade stream fallback
-        if len({t.address for t in discovered}) < 5:
-            logger.info("WhaleBrain: falling back to global trade stream")
-            try:
-                for raw in self.client.get_recent_trades(limit=1000):
-                    _add(_parse_trade(raw))
-            except Exception as exc:
-                logger.debug(f"Global whale scan error: {exc}")
+        # Sort by total flow, biggest first
+        flows.sort(key=lambda f: f.total_flow, reverse=True)
+        return flows[:12]
 
-        logger.info(
-            f"WhaleBrain: found {len(discovered)} qualifying trades "
-            f"across {len({t.address for t in discovered})} wallets"
-        )
-        return discovered
+    def _fetch_wallet_histories(
+        self, addresses: List[str]
+    ) -> Dict[str, List[WhaleTrade]]:
+        """Fetch wallet trade histories in parallel (4 threads, 6s timeout each)."""
+        if not addresses:
+            return {}
 
-    def _get_alert_market_ids(self, hours: int = 72) -> List[Tuple[str, str]]:
-        """Return (market_id, market_name) from recent alert_history rows."""
-        if not self.db:
-            return []
+        results: Dict[str, List[WhaleTrade]] = {}
+
+        def _fetch_one(addr: str) -> Tuple[str, List[WhaleTrade]]:
+            raw = self.client.get_wallet_trades(addr, limit=200)
+            trades = [_parse_trade(r) for r in raw]
+            return addr, [t for t in trades if t is not None]
+
         try:
-            cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)).isoformat()
-            with self.db._get_conn() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT DISTINCT market_id, market_name
-                    FROM alert_history
-                    WHERE platform = 'polymarket' AND timestamp > ?
-                    ORDER BY timestamp DESC
-                    LIMIT 30
-                    """,
-                    (cutoff,),
-                ).fetchall()
-            return [(r["market_id"], r["market_name"]) for r in rows]
-        except Exception as exc:
-            logger.debug(f"_get_alert_market_ids error: {exc}")
-            return []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {pool.submit(_fetch_one, addr): addr for addr in addresses}
+                for future in concurrent.futures.as_completed(futures, timeout=15):
+                    try:
+                        addr, trades = future.result(timeout=6)
+                        results[addr] = trades
+                    except Exception:
+                        results[futures[future]] = []
+        except concurrent.futures.TimeoutError:
+            logger.warning("WhaleBrain: wallet history fetch timed out (15s)")
+
+        return results
 
     def _build_profile(
-        self, address: str, discovery_trades: List[WhaleTrade]
+        self, address: str,
+        discovery_trades: List[WhaleTrade],
+        history_trades: List[WhaleTrade],
     ) -> WhaleProfile:
-        """Fetch full wallet history and assemble a WhaleProfile."""
-        raw_history = self.client.get_wallet_trades(address, limit=300)
-        all_trades  = [_parse_trade(r) for r in raw_history]
-        all_trades  = [t for t in all_trades if t is not None]
-
-        if not all_trades:
-            all_trades = discovery_trades
+        """Assemble a WhaleProfile from discovery + history trades."""
+        all_trades = history_trades if history_trades else discovery_trades
 
         total_vol      = sum(t.usd_value for t in all_trades)
         unique_markets = len({t.condition_id for t in all_trades if t.condition_id})
@@ -660,7 +753,7 @@ class WhaleBrain:
             (t.pseudonym for t in all_trades if t.pseudonym), ""
         )
 
-        # Sort recent_trades: largest USD value first for the history summary
+        # Sort: largest USD value first
         recent = sorted(all_trades, key=lambda t: t.usd_value, reverse=True)[:20]
 
         return WhaleProfile(
@@ -722,7 +815,6 @@ class WhaleBrain:
         signals: List[str],
     ) -> Dict:
         """Call Claude Haiku and return {headline, wallet_para, trade_para, angle_para}."""
-        # Build history summary (top 5 largest trades)
         hist_lines = []
         for t in profile.recent_trades[:5]:
             hist_lines.append(
@@ -842,3 +934,50 @@ Style: Bloomberg terminal analyst. Specific. Use exact dollar amounts and percen
             "No single flag rises to the level of probable insider knowledge, "
             "though the position size merits tracking."
         )
+
+    # ── Payload builders ─────────────────────────────────────────────────────
+
+    def _build_payload(
+        self,
+        flows: List[MarketFlow],
+        stories: List[WhaleStory],
+        recent_trades: List[WhaleTrade],
+    ) -> Dict:
+        profiles = [s.to_dict() for s in stories]
+        total_flow = sum(f.total_flow for f in flows)
+        top_score = max((s.insider_score for s in stories), default=0)
+        return {
+            "market_flows":   [f.to_dict() for f in flows],
+            "whale_profiles": profiles,
+            "recent_trades":  [t.to_feed_dict() for t in recent_trades],
+            "stats": {
+                "total_whales":      len(stories),
+                "total_flow_volume": round(total_flow, 2),
+                "top_insider_score": round(top_score, 1),
+                "markets_with_flow": len(flows),
+                "trades_scanned":    len(recent_trades),
+            },
+        }
+
+    def _build_payload_from_stories(
+        self,
+        stories: List[WhaleStory],
+        flows: List[MarketFlow],
+        recent: List[WhaleTrade],
+    ) -> Dict:
+        """Build a payload from pre-existing WhaleStory objects (DB warmup)."""
+        return self._build_payload(flows, stories, recent)
+
+    def _empty_payload(self) -> Dict:
+        return {
+            "market_flows":   [],
+            "whale_profiles": [],
+            "recent_trades":  [],
+            "stats": {
+                "total_whales":      0,
+                "total_flow_volume": 0,
+                "top_insider_score": 0,
+                "markets_with_flow": 0,
+                "trades_scanned":    0,
+            },
+        }
