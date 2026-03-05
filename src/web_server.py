@@ -63,7 +63,10 @@ else:
     _cfg_path = None
 
 config = load_config(_cfg_path)
-db = Database(str(ROOT_DIR / config.db_path))
+
+# Resolve DB path — Render sets SENTINEL_DB_PATH for persistent disk.
+_db_path_str = os.environ.get("SENTINEL_DB_PATH") or str(ROOT_DIR / config.db_path)
+db = Database(_db_path_str)
 
 # Read Anthropic key from config (or environment variable fallback)
 _anthropic_key = getattr(config, "anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -76,12 +79,21 @@ outlook_grader = OutlookGrader(api_key=_anthropic_key)
 _claude_active = bool(_anthropic_key)
 
 logger.info("Claude headlines: %s", "ENABLED (haiku)" if _claude_active else "DISABLED (add anthropic_api_key to config.json)")
-db.ensure_watchlist("Default")
+
+# Wrap DB-dependent startup in try/except — a DB issue at import time
+# must NOT crash the worker, otherwise Render's health check can never pass.
+try:
+    db.ensure_watchlist("Default")
+except Exception as exc:
+    logger.warning(f"Startup: ensure_watchlist failed (non-fatal): {exc}")
 
 # Warm in-memory caches from DB so the first request after a restart
 # is served instantly rather than triggering blocking Claude/API calls.
 if _claude_active:
-    outlook_gen.load_from_db(db)
+    try:
+        outlook_gen.load_from_db(db)
+    except Exception as exc:
+        logger.warning(f"Startup: outlook cache warmup failed (non-fatal): {exc}")
 
 # Timestamp of the last force-run on /api/eval/truth.
 # Guards against concurrent/repeated calls saturating all gunicorn threads.
@@ -120,6 +132,17 @@ def _attach_sparklines(items: List[Any]) -> List[Dict]:
             dicts[i]["sparkline"] = pts
 
     return dicts
+
+
+@app.route("/health")
+def health():
+    """
+    Ultra-lightweight health check for Render.
+    Returns 200 with no DB calls, no computation — just proof the
+    Python process is alive and accepting HTTP requests.
+    Render's health check has a 5-second timeout; this responds in <1ms.
+    """
+    return '{"status":"ok"}', 200, {"Content-Type": "application/json"}
 
 
 @app.route("/")
@@ -482,34 +505,52 @@ def api_feed():
         except Exception:
             pass
 
-    # ── Cache missing (first request after fresh deploy) — compute live ───
-    stories = story_gen.generate_stories(db, hours=24, limit=40)
-    radar   = story_gen.generate_radar(db, hours=24, limit=20)
-    stats   = db.get_system_stats()
-    payload = {
-        "stories":       _attach_sparklines(stories),
-        "radar":         _attach_sparklines(radar),
-        "stats":         stats,
+    # ── Cache missing (first request after fresh deploy) ──────────────
+    #    Return an empty shell immediately and compute in background.
+    #    This prevents the first request from blocking a gunicorn worker
+    #    for 30+ seconds, which causes cascading health check failures.
+    def _build_and_cache():
+        try:
+            stories = story_gen.generate_stories(db, hours=24, limit=40)
+            radar   = story_gen.generate_radar(db, hours=24, limit=20)
+            stats   = db.get_system_stats()
+            payload = {
+                "stories":       _attach_sparklines(stories),
+                "radar":         _attach_sparklines(radar),
+                "stats":         stats,
+                "claude_active": _claude_active,
+                "server_time":   datetime.now(timezone.utc).isoformat(),
+            }
+            db.set_state("api_feed_cache", {
+                "ts":   datetime.now(timezone.utc).isoformat(),
+                "data": payload,
+            })
+            logger.info(f"Feed cache built: {len(stories)} stories, {len(radar)} radar")
+        except Exception as exc:
+            logger.error(f"Feed cache build failed: {exc}")
+    threading.Thread(target=_build_and_cache, daemon=True).start()
+    return jsonify({
+        "stories":       [],
+        "radar":         [],
+        "stats":         {"markets_active": 0, "signals_24h": 0, "last_update": None},
         "claude_active": _claude_active,
         "server_time":   datetime.now(timezone.utc).isoformat(),
-    }
-    db.set_state("api_feed_cache", {
-        "ts":   datetime.now(timezone.utc).isoformat(),
-        "data": payload,
     })
-    return jsonify(payload)
 
 
 @app.route("/api/stats")
 def api_stats():
-    stats = db.get_system_stats()
-    # Render health-check uses /api/stats — surface data-freshness so the
-    # platform can detect a dead monitor process (not just a dead web process).
+    try:
+        stats = db.get_system_stats()
+    except Exception as exc:
+        logger.warning(f"/api/stats DB query failed: {exc}")
+        return jsonify({"markets_active": 0, "signals_24h": 0, "last_update": None, "monitor_stale": True})
+    # Surface data-freshness so the platform can detect a dead monitor
+    # process (not just a dead web process).
     last_update = stats.get("last_update")
     stale = True
     if last_update:
         try:
-            from datetime import datetime, timezone
             lu = datetime.fromisoformat(last_update)
             if lu.tzinfo is None:
                 lu = lu.replace(tzinfo=timezone.utc)

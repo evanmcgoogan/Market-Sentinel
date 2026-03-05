@@ -6,7 +6,7 @@ services:
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: bash scripts/start_render.sh
-    healthCheckPath: /api/stats
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
