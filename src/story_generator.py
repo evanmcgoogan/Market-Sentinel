@@ -84,12 +84,19 @@ ASSET_MAP: Dict[str, List[str]] = {
 
 CATEGORY_MAP = {
     # ── Sports: detected first, always excluded from the feed ──────────
+    #    NOTE: markets with financial keywords (earnings, IPO, acquisition)
+    #    are RESCUED by _is_noise_market() even if they match here.
     "SPORTS": [
+        # Leagues & competitions
         "premier league", "la liga", "serie a", "bundesliga", "champions league",
         "europa league", "fa cup", "mls", "ligue 1", "eredivisie",
         "super bowl", "nfl", "nba", "mlb", "nhl", "nba finals",
         "world cup", "olympics", "formula 1", " f1 ", "grand prix",
         "wimbledon", "us open", "french open", "australian open",
+        "march madness", "stanley cup", "world series", "ncaa",
+        "college football", "college basketball", "cfp", "bowl game",
+        "copa america", "euro 2024", "euro 2028", "african cup",
+        "afc championship", "nfc championship", "conference finals",
         # European clubs
         "barcelona", "real madrid", "manchester city", "manchester united",
         "liverpool", "arsenal", "chelsea", "tottenham", "atletico",
@@ -102,21 +109,31 @@ CATEGORY_MAP = {
         "lakers", "celtics", "warriors", "bulls", "knicks", "nets",
         "cowboys", "patriots", "chiefs", "eagles", "49ers", "ravens",
         "yankees", "dodgers", "red sox", "cubs", "astros", "braves",
+        "steelers", "packers", "bears", "broncos", "chargers", "dolphins",
+        "rockets", "spurs", "heat", "clippers", "nuggets", "bucks",
+        "mets", "phillies", "padres", "giants", "cardinals", "mariners",
+        "bruins", "penguins", "capitals", "oilers", "maple leafs",
         # Generic sports terms
         "league title", "league championship", "league winner",
         "win the league", "win the cup", "win the championship",
         "golden boot", "ballon d'or", "mvp award", "playoff bracket",
-        "point spread", "over/under", "betting line",
+        "point spread", "over/under", "betting line", "moneyline",
+        "spread", "prop bet", "parlay", "sportsbook",
         # Golf
         "masters tournament", "pga tour", "ryder cup", "open championship",
         "golf tournament", "golfer", "win the masters", "win the open",
         "schauffele", "mcilroy", "spieth", "woods", "koepka", "thomas",
-        "detry", "fitzpatrick", "finau", "mccarthy", "day", "rahm",
+        "detry", "fitzpatrick", "finau", "mccarthy", "rahm",
         # Tennis / combat sports / other
         "ufc ", " ufc", "bellator", "boxing match", "title fight",
-        "wimbledon", "roland garros",
+        "wimbledon", "roland garros", "atp tour", "wta tour",
+        "cricket", "rugby", "ipl", "t20", "ashes",
+        # Racing
+        "kentucky derby", "preakness", "belmont stakes", "triple crown",
+        "nascar", "indycar", "le mans",
         # Generic individual sport matchup patterns
-        "win the title", "win the trophy",
+        "win the title", "win the trophy", "win the race",
+        "win the medal", "make the cut",
     ],
 
     # ── Politics: domestic policy, law, governance, social issues ──────
@@ -583,19 +600,26 @@ class ClaudeHeadlineGenerator:
     _STATE_KEY      = "claude_headline_cache"
 
     SYSTEM = (
-        "You are the editor-in-chief of Market Sentinel — a financial intelligence terminal "
-        "for sophisticated investors, traders, and geopolitical analysts. "
-        "Your core mandate: BE AHEAD OF THE NEWS, not behind it. "
-        "Prediction markets price in information before traditional media. "
-        "Your job is to surface WHAT IS HAPPENING and WHAT IT MEANS FOR MARKETS — "
-        "not to explain market mechanics. "
-        "Coverage pillars: geopolitics & conflict, US/global politics, emerging technology "
-        "(AI, semiconductors, biotech), public markets (equities, rates, macro), "
-        "and private markets (funding rounds, IPOs, M&A). "
-        "When a market has settled (near 0% or 100%), explain the underlying EVENT that caused "
-        "resolution and immediately pivot to forward-looking signals: what live markets are "
-        "now in play, what investors should watch. "
-        "Tone: authoritative, precise, zero fluff. Think Geopolitical Futures meets Bloomberg."
+        "You are the editor-in-chief of Market Sentinel — an intelligence terminal that "
+        "synthesizes prediction market signals into actionable news for investors, traders, "
+        "and geopolitical analysts.\n\n"
+        "MANDATE: Surface what is happening in the REAL WORLD and what it means for money. "
+        "Prediction markets price in information before traditional media — your job is to "
+        "decode WHY a market is moving, not describe THAT it moved.\n\n"
+        "COVERAGE: geopolitics & armed conflict, US/global politics & policy, AI & frontier "
+        "technology, macro & public markets, crypto (BTC/ETH only), M&A & private markets.\n\n"
+        "RULES:\n"
+        "- Headlines: Lead with the EVENT, not the market. 'Iran Nuclear Talks Collapse' not "
+        "'Iran Market Surges'. Max 80 chars, present tense, active voice.\n"
+        "- Ledes: 2 sentences. Sentence 1 = what is happening. Sentence 2 = why it matters "
+        "to investors / what to watch next. Never start with 'The market' or 'Prediction markets'.\n"
+        "- For settled markets (near 0% or 100%): State what ACTUALLY HAPPENED, then pivot to "
+        "the next live question investors should be asking.\n"
+        "- Never use filler phrases: 'interestingly', 'notably', 'it's worth noting', "
+        "'in a significant development'. Just state the facts.\n"
+        "- Be specific. Name countries, people, dollar amounts, dates when known.\n"
+        "- Tone: Bloomberg terminal meets Stratfor intelligence brief. Authoritative, precise, "
+        "zero fluff."
     )
 
     def __init__(self, api_key: str, db=None):
@@ -653,19 +677,23 @@ class ClaudeHeadlineGenerator:
         if key in self._cache:
             return self._cache[key]
 
-        # Describe the cluster
+        # Describe the cluster — these should be genuinely related threshold markets
         ladder = "\n".join(
             f'  - "{s.market_name}" → {s.probability:.0f}% ({"+" if (s.prob_change or 0) >= 0 else ""}{(s.prob_change or 0):.1f}pp)'
             for s in cluster.stories
         )
         prompt = (
-            f"These {len(names)} prediction markets are all about the same underlying topic:\n\n"
+            f"These {len(names)} prediction markets are the SAME question at different "
+            f"thresholds (e.g. 250k vs 500k, or different candidates for one position):\n\n"
             f"{ladder}\n\n"
-            f"Category: {cluster.category}\n"
-            f"Signal score: {cluster.signal_score:.0f}/100\n\n"
-            f"Write a single headline and opening paragraph that captures the shared narrative "
-            f"across all these markets — what is the key question the market is debating, "
-            f"and what does the probability distribution tell us?\n\n"
+            f"Category: {cluster.category}\n\n"
+            f"Write:\n"
+            f"headline: A single news-style headline (max 80 chars) that captures the "
+            f"underlying real-world situation. Lead with the EVENT, not odds. "
+            f"E.g. 'Trump Deportation Push Stalls Below 500K Target' not 'Market Prices "
+            f"Multiple Outcomes'.\n"
+            f"lede: 2-3 sentences. What is happening, what the probability distribution "
+            f"reveals about likely outcomes, and what investors should watch.\n\n"
             f"Return only valid JSON: {{\"headline\": \"...\", \"lede\": \"...\"}}"
         )
         result = self._call_raw(prompt)
@@ -682,32 +710,34 @@ class ClaudeHeadlineGenerator:
         if is_settled:
             outcome = "YES" if prob >= 97.0 else "NO"
             prompt = (
-                f"Prediction market RESOLVED:\n\n"
-                f'Market: "{market}"\n'
-                f"Platform: {platform.title()}\n"
-                f"Final probability: {prob:.0f}% ({outcome})\n\n"
-                f"This market has settled. Write a headline and lede that:\n"
-                f"1. Lead with the actual real-world EVENT that caused this market to resolve "
-                f"(use your knowledge of recent news — do not mention 'market settled' or "
-                f"'technical artifact').\n"
-                f"2. Immediately pivot to what investors and analysts should watch NEXT — "
-                f"what live questions remain open, what other markets or assets are in play.\n"
-                f"Headline: max 85 chars, declarative statement about what happened.\n"
-                f"Lede: 2 sentences, forward-looking, actionable.\n\n"
+                f"RESOLVED EVENT:\n\n"
+                f'Market question: "{market}"\n'
+                f"Answer: {outcome} (final probability {prob:.0f}%)\n"
+                f"Platform: {platform.title()}\n\n"
+                f"Write:\n"
+                f"headline: The real-world event that caused this (max 80 chars, declarative, "
+                f"present tense). Lead with WHAT HAPPENED — not 'market resolves' or odds.\n"
+                f"lede: 2 sentences. (1) What happened and its immediate significance. "
+                f"(2) The next live question investors should be asking — name a specific "
+                f"asset, sector, or upcoming event to watch.\n\n"
                 f"Return only valid JSON: {{\"headline\": \"...\", \"lede\": \"...\"}}"
             )
         else:
             prompt = (
-                f"Prediction market MOVING — early signal detected:\n\n"
+                f"EARLY SIGNAL:\n\n"
                 f'Market: "{market}"\n'
-                f"Platform: {platform.title()}\n"
-                f"Probability: {old_str} → {prob:.0f}% (has {direction} {change_str})\n"
+                f"Probability: {old_str} → {prob:.0f}% ({direction} {change_str})\n"
                 f"Signal triggers: {'; '.join(signals)}\n"
-                f"Signal strength: {score:.0f}/100\n\n"
-                f"Write a headline (max 85 chars, present tense, active voice) "
-                f"and a 2-sentence lede. Lead with what is ACTUALLY HAPPENING in the world "
-                f"that is driving this move — not market mechanics. "
-                f"Be specific. Do not start the lede with 'The market'.\n\n"
+                f"Strength: {score:.0f}/100\n"
+                f"Platform: {platform.title()}\n\n"
+                f"Write:\n"
+                f"headline: What real-world development is driving this move (max 80 chars, "
+                f"present tense, active voice). Do NOT describe the probability change — "
+                f"describe the EVENT causing it.\n"
+                f"lede: 2 sentences. (1) What is happening in the real world — be specific, "
+                f"name people/countries/amounts. Never start with 'The market' or "
+                f"'Prediction markets'. (2) Why this matters to investors — name exposed "
+                f"assets or sectors.\n\n"
                 f"Return only valid JSON: {{\"headline\": \"...\", \"lede\": \"...\"}}"
             )
         return self._call_raw(prompt)
@@ -844,8 +874,16 @@ class StoryGenerator:
         rows = db.get_recent_alerts_feed(hours=hours, limit=limit)
         raw  = [s for s in (self._row_to_story(r) for r in rows) if s]
 
-        # Drop sports — they slip through the sentinel filter occasionally
+        # ── Noise filter: drop sports, entertainment, crypto noise, etc.
+        #    Sports markets with genuine financial significance are rescued.
+        raw = [s for s in raw if not _is_noise_market(s.market_name)]
+
+        # ── Also drop anything categorized as SPORTS that slipped through
         raw = [s for s in raw if s.category != "SPORTS"]
+
+        # ── Suppress "OTHER" category if it's low signal (< 50) — these are
+        #    uncategorized markets that add noise without editorial value.
+        raw = [s for s in raw if s.category != "OTHER" or s.signal_score >= 50]
 
         # Mark and heavily penalize settled markets (prob ≥97% or ≤3%).
         # They are resolved events, not early signals. They stay in the feed
@@ -882,14 +920,20 @@ class StoryGenerator:
                 seen_ids.add(r["market_id"])
                 combined.append(r)
 
-        # Convert to stories, drop sports and settled markets
+        # Convert to stories, apply comprehensive noise filter
         stories = [s for s in (self._mover_to_story(r) for r in combined) if s]
+        stories = [s for s in stories if not _is_noise_market(s.market_name)]
         stories = [s for s in stories if s.category != "SPORTS"]
         stories = [s for s in stories if 3.0 < s.probability < 97.0]  # live markets only
 
-        # Keep only editorially relevant categories — radar is not a general prediction market index
-        RADAR_CATEGORIES = {"GEOPOLITICS", "CONFLICT", "POLITICS", "MARKETS", "TECHNOLOGY", "OTHER"}
-        stories = [s for s in stories if s.category in RADAR_CATEGORIES]
+        # Keep only editorially relevant categories — radar is not a general
+        # prediction market index.  "OTHER" only if volume is significant.
+        RADAR_CATEGORIES = {"GEOPOLITICS", "CONFLICT", "POLITICS", "MARKETS", "TECHNOLOGY"}
+        stories = [
+            s for s in stories
+            if s.category in RADAR_CATEGORIES
+            or (s.category == "OTHER" and (s.volume_24h or 0) >= 500_000)
+        ]
 
         stories.sort(key=lambda s: s.volume_24h or 0.0, reverse=True)
         return stories[:limit]
@@ -909,13 +953,8 @@ class StoryGenerator:
         if not rows:
             return []
 
-        # Filter to editorial pillars — no sports, no entertainment
-        SPORTS_SKIP = CATEGORY_MAP.get("SPORTS", [])
-        def is_relevant(name: str) -> bool:
-            nl = name.lower()
-            return not any(kw in nl for kw in SPORTS_SKIP)
-
-        rows = [r for r in rows if is_relevant(r["market_name"])][:limit]
+        # Filter to editorial pillars — no sports, no entertainment, no noise
+        rows = [r for r in rows if not _is_noise_market(r["market_name"])][:limit]
 
         # Pull the live radar for related-market surfacing
         live_radar = db.get_top_volume_markets(limit=60, hours=2)
@@ -1010,33 +1049,23 @@ class StoryGenerator:
 
     def _cluster(self, stories: List[Story]) -> List[Union[Story, StoryCluster]]:
         """
-        Group stories about the same underlying topic into StoryCluster objects.
-        Uses greedy word-overlap matching — fast enough for < 100 stories.
+        Group stories that are the SAME question with different thresholds
+        (e.g. "deport 250k / 500k / 1M") into StoryCluster objects.
+
+        Uses question-stem matching: two markets cluster only if their
+        stems are identical after stripping numbers, dates, and thresholds.
+        This prevents "Trump tariffs" from merging with "Trump impeachment"
+        just because they share the word "trump".
         """
-        fingerprints = [_content_words(s.market_name) for s in stories]
-        assigned = [-1] * len(stories)
-        clusters: List[List[int]] = []
+        from collections import defaultdict
 
+        stem_groups: Dict[str, List[int]] = defaultdict(list)
         for i, story in enumerate(stories):
-            best_cluster = -1
-            best_sim = self.CLUSTER_THRESHOLD
-
-            for c_idx, members in enumerate(clusters):
-                rep = fingerprints[members[0]]
-                sim = _word_similarity(fingerprints[i], rep)
-                if sim > best_sim:
-                    best_sim = sim
-                    best_cluster = c_idx
-
-            if best_cluster >= 0:
-                clusters[best_cluster].append(i)
-                assigned[i] = best_cluster
-            else:
-                assigned[i] = len(clusters)
-                clusters.append([i])
+            stem = _question_stem(story.market_name)
+            stem_groups[stem].append(i)
 
         result: List[Union[Story, StoryCluster]] = []
-        for members in clusters:
+        for stem, members in stem_groups.items():
             if len(members) == 1:
                 result.append(stories[members[0]])
             else:
@@ -1186,6 +1215,205 @@ class StoryGenerator:
 # ---------------------------------------------------------------------------
 # Pure helper functions (no class state needed)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Question-stem extraction for intelligent clustering
+# ---------------------------------------------------------------------------
+
+# Regex that matches numbers, dollar amounts, percentages, date fragments,
+# and ordinal suffixes — these are the "variant" parts of threshold-style
+# markets (e.g. 250k / 500k / $1M / 15% / Q1 2025).
+_VARIANT_TOKENS = re.compile(
+    r'\b\d[\d,]*(?:\.\d+)?[%kKmMbB]?\b'       # numbers + optional suffix
+    r'|\$\d[\d,]*(?:\.\d+)?[kKmMbB]?'          # dollar amounts
+    r'|\b(?:january|february|march|april|may|june|july|august|september'
+    r'|october|november|december)\b'             # month names
+    r'|\b20\d{2}\b'                              # years 20xx
+    r'|\b(?:1st|2nd|3rd|\dth)\b',               # ordinals
+    re.IGNORECASE,
+)
+
+# Leading question words stripped before stem comparison
+_QUESTION_PREFIX = re.compile(
+    r'^(will|who will|what will|when will|does|is|are|can|has|have|should)\s+',
+    re.IGNORECASE,
+)
+
+
+def _question_stem(name: str) -> str:
+    """
+    Extract the question stem: the invariant part of a market name after
+    stripping numbers, thresholds, dates, and question words.
+
+    Only markets with *identical* stems should cluster — this means they're
+    the same question asked at different thresholds (e.g. 250k / 500k / 1M).
+
+    "Will Trump deport 250,000 immigrants before July 2025?"
+    "Will Trump deport 500,000 immigrants before July 2025?"
+    → both produce: "trump deport immigrants before" → CLUSTER ✓
+
+    "Will Trump deport 250,000 immigrants?" vs "Will Trump be impeached?"
+    → "trump deport immigrants" vs "trump be impeached" → DIFFERENT → separate ✓
+    """
+    s = name.lower().strip()
+    s = re.sub(r'\?$', '', s).strip()               # drop trailing ?
+    s = _QUESTION_PREFIX.sub('', s).strip()          # drop "will", "does", etc.
+    s = _VARIANT_TOKENS.sub(' ', s)                  # strip numbers/dates/$
+    s = re.sub(r'[^\w\s]', ' ', s)                   # strip punctuation
+    s = ' '.join(s.split())                          # collapse whitespace
+    # Remove stop words for a cleaner stem
+    words = [w for w in s.split() if w not in STOP_WORDS and len(w) > 1]
+    return ' '.join(words)
+
+
+# ---------------------------------------------------------------------------
+# Noise / sports / entertainment filters
+# ---------------------------------------------------------------------------
+
+# Financial keywords that RESCUE a market from the sports/entertainment filter.
+# If a sports-tagged market is actually about earnings, valuations, ownership,
+# or financial events — it stays.
+_FINANCIAL_RESCUE_KEYWORDS = frozenset([
+    'earnings', 'revenue', 'profit', 'valuation', 'ipo', 'acquisition',
+    'merger', 'buyout', 'bankruptcy', 'stock', 'share price', 'market cap',
+    'quarterly', 'annual report', 'dividend', 'invest', 'ownership',
+    'bought', 'sold', 'deal', 'sponsorship deal', 'broadcast rights',
+    'salary cap', 'franchise value', 'pe ratio', 'sec filing',
+])
+
+# Expanded sports patterns — catches more variants than the CATEGORY_MAP list.
+# These are substring checks (case-insensitive) applied ONLY after the
+# financial rescue test fails.
+_SPORTS_BLOCK_PATTERNS = [
+    # Outcome language unique to sports
+    "win the league", "win the cup", "win the title", "win the championship",
+    "win the series", "win the match", "win the tournament", "win the race",
+    "win the medal", "gold medal", "silver medal", "bronze medal",
+    "qualify for", "relegat", "promoted to", "make the playoffs",
+    "win mvp", "win rookie", "defensive player", "cy young", "heisman",
+    "all-star", "all star", "home run", "touchdown", "goal scored",
+    "hat trick", "free throw", "field goal", "three-pointer",
+    "strikeout", "batting average", "yards", "assists",
+    "clean sheet", "penalty kick", "red card", "yellow card",
+    # Draft/transfer language
+    "draft pick", "first overall", "traded to", "free agent sign",
+    "transfer window", "transfer fee", "loan deal",
+    # Season / match result language
+    "regular season", "postseason", "game score", "final score",
+    "match result", "halftime", "overtime", "extra time", "penalty shootout",
+    "seed", "bracket", "round of", "quarterfinal", "semifinal",
+    "group stage", "knockout stage",
+]
+
+# Crypto noise — high-frequency binary markets on daily price thresholds.
+# These add zero signal value; users can get this from any price chart.
+_CRYPTO_NOISE_PATTERNS = [
+    "bitcoin above", "bitcoin below", "bitcoin over", "bitcoin under",
+    "btc above", "btc below", "btc over", "btc under",
+    "ethereum above", "ethereum below", "ethereum over", "ethereum under",
+    "eth above", "eth below", "eth over", "eth under",
+    "solana above", "solana below", "sol above", "sol below",
+    "crypto above", "crypto below",
+    "by end of day", "by end of week", "close above", "close below",
+    "price of bitcoin be above", "price of bitcoin be below",
+    "price of bitcoin above", "price of bitcoin below",
+    "price of ethereum be above", "price of ethereum be below",
+    "price of ethereum above", "price of ethereum below",
+]
+
+# Generic low-signal markets that add noise
+_NOISE_PATTERNS = [
+    "will it rain", "will it snow", "temperature above", "temperature below",
+    "weather", "who will be eliminated", "reality tv", "love island",
+    "bachelor", "bachelorette", "big brother", "survivor",
+    "tiktok views", "youtube subscribers", "instagram followers",
+    "twitter followers", "x followers",
+]
+
+# Esports / gaming — not financial signal
+_ESPORTS_PATTERNS = [
+    "counter-strike", "counter strike", "cs:", "cs2", "csgo",
+    "league of legends", "lol:", "valorant", "dota",
+    "overwatch", "call of duty", "cod:", "rainbow six",
+    "esl pro", "blast premier", "iem ", "pgl ",
+    " bo1", " bo3", " bo5",  # best-of series formats
+    "esport", "e-sport",
+]
+
+# Parlay/combo market detection: Kalshi combo markets have names like
+# "yes Georgia Tech,yes SMU,yes Milwaukee" — these are sports parlays
+# dressed up as prediction markets. Detect them by structure.
+_COMBO_PATTERN = re.compile(
+    r'(?:yes|no)\s+[A-Z].*?,\s*(?:yes|no)\s+[A-Z]',
+    re.IGNORECASE,
+)
+
+# Sports-adjacent terms that appear in parlay/prop names
+_PARLAY_SPORTS_TERMS = [
+    "wins by over", "wins by under", "wins by more than",
+    "points,", "rebounds,", "assists,",
+    # "FC win" / "FC lose" patterns for football match markets
+    " fc win", " fc lose", " fc draw",
+    # Common in Kalshi daily match/game markets
+    " win on 20",  # e.g. "Will Newcastle United FC win on 2026-03-04?"
+]
+
+
+def _is_noise_market(name: str) -> bool:
+    """
+    Return True if a market is noise that should be excluded from the feed.
+
+    Multi-pass filter:
+    0. Financial rescue — keep sports markets about money (earnings, IPO, etc.)
+    1. Combo/parlay detection — "yes X, yes Y" format = sports parlay
+    2. Sports entity + outcome language detection
+    3. Esports / gaming detection
+    4. Crypto daily price threshold noise
+    5. Generic noise (weather, reality TV, social media)
+
+    Sports markets with genuine financial significance are RESCUED in pass 0.
+    """
+    nl = name.lower()
+
+    # ── Pass 0: financial rescue — if the market is about money/business,
+    #    keep it even if it mentions a sports entity.
+    if any(kw in nl for kw in _FINANCIAL_RESCUE_KEYWORDS):
+        return False
+
+    # ── Pass 1: combo/parlay detection ────────────────────────────────
+    #    Kalshi parlays look like "yes Team1,yes Team2,yes Team3"
+    if _COMBO_PATTERN.search(name):
+        return True
+
+    # ── Pass 1b: sports-adjacent parlay/prop terms ────────────────────
+    if any(pat in nl for pat in _PARLAY_SPORTS_TERMS):
+        return True
+
+    # ── Pass 2: sports detection ──────────────────────────────────────
+    # First check CATEGORY_MAP sports keywords (comprehensive entity list)
+    is_sports = any(kw in nl for kw in CATEGORY_MAP["SPORTS"])
+
+    # Also check sports outcome language
+    if not is_sports:
+        is_sports = any(pat in nl for pat in _SPORTS_BLOCK_PATTERNS)
+
+    if is_sports:
+        return True
+
+    # ── Pass 3: esports / gaming ──────────────────────────────────────
+    if any(pat in nl for pat in _ESPORTS_PATTERNS):
+        return True
+
+    # ── Pass 4: crypto price noise ────────────────────────────────────
+    if any(pat in nl for pat in _CRYPTO_NOISE_PATTERNS):
+        return True
+
+    # ── Pass 5: generic noise ─────────────────────────────────────────
+    if any(pat in nl for pat in _NOISE_PATTERNS):
+        return True
+
+    return False
+
 
 # Words kept lowercase in title case (unless first word)
 _LOWER_WORDS = frozenset([
