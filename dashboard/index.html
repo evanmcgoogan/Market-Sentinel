@@ -543,56 +543,173 @@
     .radar-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.08); }
     .radar-headline { font-family: var(--f-display); font-size: .88rem; font-weight: 700; line-height: 1.3; }
 
-    /* ─── Detail drawer ─────────────────────────────────────────── */
-    .drawer-overlay {
-      position: fixed; inset: 0;
-      background: rgba(28,23,20,.55);
-      z-index: 200;
-      opacity: 0; pointer-events: none;
-      transition: opacity .25s ease;
-    }
-    .drawer-overlay.open { opacity: 1; pointer-events: all; }
+    /* ─── Intelligence Workspace ──────────────────────────────── */
+    body.ws-active .container,
+    body.ws-active .section-tabs { display: none; }
 
-    .drawer {
-      position: fixed; top: 0; right: 0; bottom: 0;
-      width: 480px; max-width: 95vw;
-      background: var(--card-bg);
-      border-left: 1px solid var(--card-border);
+    .workspace {
+      display: none;
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 20px 28px 60px;
+    }
+    body.ws-active .workspace {
+      display: grid;
+      grid-template-columns: minmax(220px, 280px) 1fr minmax(240px, 300px);
+      gap: 0;
+      animation: ws-fadein .28s ease;
+    }
+    @keyframes ws-fadein {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .ws-col {
+      min-height: calc(100vh - 200px);
       overflow-y: auto;
-      transform: translateX(100%);
-      transition: transform .28s cubic-bezier(.4,0,.2,1);
-      z-index: 201;
-      padding: 28px 28px 60px;
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
+      scrollbar-width: thin;
     }
-    .drawer.open { transform: translateX(0); }
+    .ws-left {
+      padding-right: 20px;
+      border-right: 1px solid var(--card-border);
+    }
+    .ws-center { padding: 0 28px; }
+    .ws-right {
+      padding-left: 20px;
+      border-left: 1px solid var(--card-border);
+    }
 
-    .drawer-close {
-      position: absolute; top: 18px; right: 20px;
-      width: 32px; height: 32px;
-      background: #F0E8DF; border: none; border-radius: 50%;
-      font-size: 1.1rem; cursor: pointer; color: var(--text-1);
-      display: flex; align-items: center; justify-content: center;
+    .ws-back {
+      display: flex; align-items: center; gap: 6px;
+      font-size: .7rem; font-weight: 600; color: var(--text-3);
+      text-transform: uppercase; letter-spacing: .08em;
+      cursor: pointer; border: none; background: none;
+      padding: 6px 0; margin-bottom: 16px;
+      transition: color .15s;
     }
-    .drawer-close:hover { background: #E0D4C8; }
-    .drawer-headline {
+    .ws-back:hover { color: var(--text-1); }
+    .ws-back svg { flex-shrink: 0; }
+
+    .ws-nav-label {
+      font-size: .6rem; font-weight: 700;
+      letter-spacing: .1em; text-transform: uppercase;
+      color: var(--text-3); margin: 16px 0 6px;
+      padding-bottom: 5px; border-bottom: 1px solid var(--card-border);
+    }
+    .ws-nav-label:first-of-type { margin-top: 0; }
+
+    .ws-signal-item {
+      padding: 9px 10px; margin: 0 -10px;
+      border-left: 3px solid transparent;
+      cursor: pointer; transition: all .15s;
+      border-radius: 0 4px 4px 0;
+    }
+    .ws-signal-item:hover { background: #F5EDE3; }
+    .ws-signal-item.active {
+      background: #F0E6D8; border-left-color: var(--ink);
+    }
+    .ws-signal-title {
+      font-family: var(--f-serif); font-size: .76rem;
+      line-height: 1.3; color: var(--text-1);
+    }
+    .ws-signal-meta {
+      font-size: .6rem; color: var(--text-3); margin-top: 2px;
+    }
+    .ws-signal-cat {
+      display: inline-block; font-size: .5rem; font-weight: 700;
+      letter-spacing: .06em; text-transform: uppercase;
+      padding: 1px 5px; border-radius: 2px;
+    }
+
+    .ws-headline {
       font-family: var(--f-display);
-      font-size: 1.4rem; font-weight: 800;
-      line-height: 1.25; color: var(--text-1);
-      padding-right: 40px;
+      font-size: 1.7rem; font-weight: 800;
+      line-height: 1.2; color: var(--text-1);
+      margin-bottom: 14px;
     }
-    .drawer-lede {
+    .ws-lede {
       font-family: var(--f-serif);
-      font-size: .93rem; line-height: 1.7; color: var(--text-2);
+      font-size: 1.02rem; line-height: 1.75; color: var(--text-2);
+      margin-bottom: 20px;
     }
-    .drawer-section-lbl {
+    .ws-actions {
+      display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px;
+    }
+    .ws-section-lbl {
       font-size: .65rem; font-weight: 700;
       letter-spacing: .1em; text-transform: uppercase;
       color: var(--text-3); border-bottom: 1px solid var(--card-border);
-      padding-bottom: 6px; margin-bottom: 2px;
+      padding-bottom: 6px; margin-bottom: 10px; margin-top: 28px;
     }
+
+    .ws-prob-hero {
+      text-align: center; padding: 20px 0 16px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 12px;
+    }
+    .ws-prob-big {
+      font-size: 3.2rem; font-weight: 800;
+      font-variant-numeric: tabular-nums; line-height: 1;
+      color: var(--text-1);
+    }
+    .ws-prob-big .unit { font-size: 1.5rem; }
+    .ws-prob-delta {
+      font-size: .85rem; font-weight: 600; margin-top: 6px;
+    }
+    .ws-prob-platform {
+      font-size: .62rem; color: var(--text-3); margin-top: 4px;
+      text-transform: uppercase; letter-spacing: .1em;
+    }
+
+    .ws-context-label {
+      font-size: .6rem; font-weight: 700;
+      letter-spacing: .1em; text-transform: uppercase;
+      color: var(--text-3); margin: 20px 0 8px;
+      padding-bottom: 5px; border-bottom: 1px solid var(--card-border);
+    }
+    .ws-context-label:first-child { margin-top: 0; }
+    .ws-related-item {
+      padding: 8px 0; border-bottom: 1px solid #EFE7DB;
+      cursor: pointer; transition: background .12s;
+    }
+    .ws-related-item:last-child { border-bottom: none; }
+    .ws-related-item:hover { background: #F5EDE3; margin: 0 -6px; padding: 8px 6px; }
+    .ws-related-title {
+      font-size: .74rem; line-height: 1.35; color: var(--text-1);
+    }
+    .ws-related-prob {
+      font-size: .66rem; font-weight: 600; color: var(--text-2);
+      font-variant-numeric: tabular-nums; margin-top: 2px;
+    }
+    .ws-source-link {
+      display: inline-block; font-size: .72rem; color: var(--text-2);
+      text-decoration: none; padding: 6px 0;
+    }
+    .ws-source-link:hover { color: var(--text-1); }
+
+    @media (max-width: 1080px) {
+      body.ws-active .workspace {
+        grid-template-columns: 220px 1fr;
+      }
+      .ws-right { display: none; }
+      .ws-center { padding: 0 20px; }
+    }
+    @media (max-width: 640px) {
+      body.ws-active .workspace {
+        grid-template-columns: 1fr;
+        padding: 12px 16px 40px;
+      }
+      .ws-left {
+        border-right: none; padding-right: 0;
+        min-height: auto; max-height: 200px;
+        border-bottom: 1px solid var(--card-border);
+        padding-bottom: 12px; margin-bottom: 12px;
+      }
+      .ws-center { padding: 0; }
+      .ws-headline { font-size: 1.3rem; }
+    }
+
+    /* Workspace inner element styles */
     .drawer-signal {
       font-size: .8rem; color: var(--text-2);
       padding: 6px 10px; background: #F5EDE3;
@@ -605,7 +722,6 @@
     }
     .drawer-market-name { flex: 1; font-size: .8rem; color: var(--text-2); line-height: 1.35; }
     .drawer-market-pct { font-size: 1rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .drawer-actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:4px; }
     .drawer-btn {
       border: 1px solid var(--card-border);
       background: #F8EFE3;
@@ -838,7 +954,7 @@
       white-space: nowrap;
     }
 
-    /* ─── Intelligence Note (drawer) ───────────────────────────── */
+    /* ─── Intelligence Note (workspace) ──────────────────────────── */
     .intel-note {
       background: #FFFAF3;
       border: 1px solid #D9C9A8;
@@ -1034,13 +1150,6 @@
       .lead-card .headline { font-size: 1.45rem; }
       .lead-card-inner { grid-template-columns: 1fr; }
       .lead-card-stat { display: none; }
-      .drawer {
-        width: 100vw;
-        max-width: 100vw;
-        padding: 22px 16px 44px;
-      }
-      .drawer-headline { font-size: 1.2rem; }
-      .drawer-lede { font-size: .86rem; }
       .search-wrap { display: none; }
     }
     @media (max-width: 520px) {
@@ -1057,7 +1166,7 @@
         padding-bottom: 4px;
       }
       .masthead-right .masthead-date { display: none; }
-      .drawer-actions .drawer-btn {
+      .ws-actions .drawer-btn {
         width: 100%;
         justify-content: center;
       }
@@ -1131,9 +1240,6 @@
         padding: 3px 6px;
       }
       .thesis-list { font-size: .69rem; }
-      .drawer {
-        padding: 20px 14px calc(42px + env(safe-area-inset-bottom));
-      }
       .wf-text {
         font-size: .8rem;
         line-height: 1.5;
@@ -1158,8 +1264,8 @@
       .platform-tag {
         font-size: .54rem;
       }
-      .drawer-headline { font-size: 1.08rem; }
-      .drawer-lede { font-size: .82rem; }
+      .ws-headline { font-size: 1.08rem; }
+      .ws-lede { font-size: .82rem; }
       .panel-chip {
         font-size: .54rem;
         padding: 2px 6px;
@@ -1176,15 +1282,6 @@
   <div class="loader-rule"><div class="loader-fill"></div></div>
   <div class="loader-sub">Connecting to feed…</div>
 </div>
-
-<!-- Drawer overlay -->
-<div class="drawer-overlay" id="overlay"></div>
-
-<!-- Detail drawer -->
-<aside class="drawer" id="drawer">
-  <button class="drawer-close" id="drawer-close" aria-label="Close">✕</button>
-  <div id="drawer-body"></div>
-</aside>
 
 <!-- Masthead -->
 <header class="masthead">
@@ -1310,7 +1407,7 @@
         <button class="panel-note-btn" onclick="createWatchlist()">New Watchlist</button>
       </div>
       <div id="watchlists-panel">
-        <div class="panel-sub">No watchlist items yet. Save markets from the drawer.</div>
+        <div class="panel-sub">No watchlist items yet. Save markets from any signal.</div>
       </div>
     </section>
     <section class="panel">
@@ -1324,6 +1421,13 @@
     </section>
   </div>
 </main>
+
+<!-- Intelligence Workspace (three-column layout, shown on signal click) -->
+<div class="workspace" id="workspace">
+  <div class="ws-col ws-left" id="ws-left"></div>
+  <div class="ws-col ws-center" id="ws-center"></div>
+  <div class="ws-col ws-right" id="ws-right"></div>
+</div>
 
 <script>
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -1773,16 +1877,86 @@ function renderWorkflowContext(el, data) {
   `;
 }
 
-// ─── Drawer ───────────────────────────────────────────────────────────
+// ─── Intelligence Workspace ───────────────────────────────────────────
 
 function openDrawer(rawItem) {
   const item = normalizeWorkflowItem(rawItem) || rawItem;
   window.__activeDrawerItem = item;
-  const b = $('drawer-body');
+
+  // Build all three columns
+  _buildWsLeft(item);
+  _buildWsCenter(item);
+  _buildWsRight(item);
+
+  // Show workspace, hide feed
+  document.body.classList.add('ws-active');
+  window.scrollTo({top: 0, behavior: 'instant'});
+
+  // Kick off async intelligence + workflow context
+  fetchContext(item);
+  fetchWorkflowContext(item);
+}
+
+function closeDrawer() {
+  document.body.classList.remove('ws-active');
+}
+
+// ── Left column: signal navigation ────────────────────────────────────
+
+function _buildWsLeft(activeItem) {
+  const el = $('ws-left');
+  let html = `<button class="ws-back" onclick="closeDrawer()">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+    Back to feed
+  </button>`;
+
+  // Current (active) signal at top
+  html += _wsNavItem(activeItem, true);
+
+  // Same-category signals
+  const sameCat = allStories.filter(s => s.category === activeItem.category && s.id !== activeItem.id);
+  if (sameCat.length) {
+    html += `<div class="ws-nav-label">${activeItem.category}</div>`;
+    sameCat.slice(0, 10).forEach(s => { html += _wsNavItem(s, false); });
+  }
+
+  // Other category signals
+  const other = allStories.filter(s => s.category !== activeItem.category && s.id !== activeItem.id).slice(0, 8);
+  if (other.length) {
+    html += `<div class="ws-nav-label">Other signals</div>`;
+    other.forEach(s => { html += _wsNavItem(s, false); });
+  }
+
+  // Radar (developing)
+  const radar = allRadar.filter(r => r.id !== activeItem.id).slice(0, 5);
+  if (radar.length) {
+    html += `<div class="ws-nav-label">Developing</div>`;
+    radar.forEach(s => { html += _wsNavItem(s, false); });
+  }
+
+  el.innerHTML = html;
+}
+
+function _wsNavItem(item, isActive) {
+  const prob = item.probability != null ? `${item.probability.toFixed(0)}%` : '';
+  const dl = deltaLabel(item.prob_change);
+  const parts = [item.relative_time, prob, dl].filter(Boolean);
+  return `<div class="ws-signal-item${isActive ? ' active' : ''}"
+    onclick="openDrawer(${JSON.stringify(item).replace(/"/g,'&quot;')})">
+    <div class="ws-signal-title">${item.headline}</div>
+    <div class="ws-signal-meta">${parts.join(' · ')}</div>
+  </div>`;
+}
+
+// ── Center column: primary intelligence brief ─────────────────────────
+
+function _buildWsCenter(item) {
+  const el = $('ws-center');
+
   let signals = '';
   if (!item.is_cluster && item.signals && item.signals.length) {
     const rows = item.signals.map(s => `<div class="drawer-signal">${s}</div>`).join('');
-    signals = `<div class="drawer-section-lbl">Signals detected</div>${rows}`;
+    signals = `<div class="ws-section-lbl">Signals detected</div>${rows}`;
   }
 
   let markets = '';
@@ -1793,21 +1967,13 @@ function openDrawer(rawItem) {
         <div class="drawer-market-pct">${m.probability.toFixed(0)}%</div>
         ${m.prob_change != null ? `<span class="delta ${dirClass(m.prob_change)}">${deltaLabel(m.prob_change)}</span>` : ''}
       </div>`).join('');
-    markets = `<div class="drawer-section-lbl">All markets in this cluster</div>${rows}`;
+    markets = `<div class="ws-section-lbl">All markets in this cluster</div>${rows}`;
   }
 
   const probSection = item.is_cluster
     ? ladderHTML(item.cluster_markets)
     : probHTML(item.old_probability, item.probability, item.prob_change, true);
 
-  // Full-width sparkline
-  const drawerSpark = item.sparkline && item.sparkline.length > 2
-    ? `<div style="margin:4px 0 12px;width:100%;overflow:hidden">
-        ${sparklineHTML(item.sparkline, 420, 60, true)}
-       </div>`
-    : '';
-
-  // Intel note: skeleton while we fetch, then replaced by real content
   const intelSkeleton = `
     <div id="intel-note">
       <div class="intel-skeleton">
@@ -1821,39 +1987,103 @@ function openDrawer(rawItem) {
       <div class="wf-box"><div class="wf-title">Decision Workflow</div><div class="panel-sub">Building context…</div></div>
     </div>`;
 
-  b.innerHTML = `
-    <div class="meta" style="margin-bottom:6px">${metaHTML(item)}</div>
-    <div class="drawer-headline">${item.headline}</div>
-    <div class="drawer-lede">${item.lede}</div>
-    <div class="drawer-actions">
+  el.innerHTML = `
+    <div class="meta" style="margin-bottom:12px">${metaHTML(item)}</div>
+    <div class="ws-headline">${item.headline}</div>
+    <div class="ws-lede">${item.lede}</div>
+    <div class="ws-actions">
       <button class="drawer-btn" onclick="saveCurrentToWatchlist()">Save to Watchlist</button>
       <button class="drawer-btn" onclick="followCurrentThesis()">Follow Thesis</button>
     </div>
     ${intelSkeleton}
-    ${workflowSkeleton}
-    ${drawerSpark}
-    ${probSection}
-    ${scoreHTML(item.signal_score)}
     ${signals}
     ${markets}
-    ${watchHTML(item.watch_assets)}
+    ${probSection}
+    ${scoreHTML(item.signal_score)}
+    ${workflowSkeleton}
   `;
-
-  $('drawer').classList.add('open');
-  $('overlay').classList.add('open');
-
-  // Kick off async context fetch — updates #intel-note in place
-  fetchContext(item);
-  fetchWorkflowContext(item);
 }
 
-function closeDrawer() {
-  $('drawer').classList.remove('open');
-  $('overlay').classList.remove('open');
-}
+// ── Right column: context & related markets ───────────────────────────
 
-$('drawer-close').addEventListener('click', closeDrawer);
-$('overlay').addEventListener('click', closeDrawer);
+function _buildWsRight(item) {
+  const el = $('ws-right');
+
+  // Probability hero
+  let probHero = '';
+  if (item.probability != null) {
+    const dc = dirClass(item.prob_change);
+    const dl = deltaLabel(item.prob_change);
+    probHero = `<div class="ws-prob-hero">
+      <div class="ws-prob-big">${item.probability.toFixed(0)}<span class="unit">%</span></div>
+      ${dl ? `<div class="ws-prob-delta" style="color:var(--${dc})">${dl}</div>` : ''}
+      <div class="ws-prob-platform">${item.platform || ''}</div>
+    </div>`;
+  }
+
+  // Sparkline
+  const spark = item.sparkline && item.sparkline.length > 2
+    ? `<div style="margin:12px 0;width:100%;overflow:hidden">${sparklineHTML(item.sparkline, 260, 55, true)}</div>`
+    : '';
+
+  // Watch assets
+  const watch = watchHTML(item.watch_assets);
+
+  // Ladder for clusters
+  const ladder = item.is_cluster ? ladderHTML(item.cluster_markets) : '';
+
+  // Related radar markets (same category)
+  const related = allRadar
+    .filter(r => r.category === item.category && r.id !== item.id)
+    .slice(0, 6);
+  let relatedHTML = '';
+  if (related.length) {
+    relatedHTML = `<div class="ws-context-label">Related developing</div>`;
+    related.forEach(r => {
+      const p = r.probability != null ? `${r.probability.toFixed(0)}%` : '';
+      const d = deltaLabel(r.prob_change);
+      relatedHTML += `<div class="ws-related-item" onclick="openDrawer(${JSON.stringify(r).replace(/"/g,'&quot;')})">
+        <div class="ws-related-title">${r.headline}</div>
+        <div class="ws-related-prob">${[p, d].filter(Boolean).join(' ')}</div>
+      </div>`;
+    });
+  }
+
+  // Cross-category signals
+  const crossCat = allStories
+    .filter(s => s.category !== item.category && s.id !== item.id)
+    .slice(0, 4);
+  let crossHTML = '';
+  if (crossCat.length) {
+    crossHTML = `<div class="ws-context-label">Other sectors</div>`;
+    crossCat.forEach(s => {
+      crossHTML += `<div class="ws-related-item" onclick="openDrawer(${JSON.stringify(s).replace(/"/g,'&quot;')})">
+        <div class="ws-related-title">${s.headline}</div>
+        <div class="ws-related-prob" style="color:var(--text-3)">${s.category} · ${s.relative_time}</div>
+      </div>`;
+    });
+  }
+
+  // Platform link
+  let link = '';
+  const p = (item.platform || '').toLowerCase();
+  if (p === 'polymarket') {
+    link = `<div class="ws-context-label">Source</div><a class="ws-source-link" href="https://polymarket.com" target="_blank" rel="noopener">View on Polymarket →</a>`;
+  } else if (p === 'kalshi') {
+    link = `<div class="ws-context-label">Source</div><a class="ws-source-link" href="https://kalshi.com" target="_blank" rel="noopener">View on Kalshi →</a>`;
+  }
+
+  el.innerHTML = `
+    ${probHero}
+    ${spark}
+    ${scoreHTML(item.signal_score)}
+    ${ladder}
+    ${watch ? `<div style="margin-top:16px">${watch}</div>` : ''}
+    ${relatedHTML}
+    ${crossHTML}
+    ${link}
+  `;
+}
 
 async function saveCurrentToWatchlist() {
   const item = normalizeWorkflowItem(window.__activeDrawerItem);
@@ -2010,7 +2240,7 @@ async function followWatchlistItem(itemId) {
 function renderWatchlistsPanel(watchlists) {
   const el = $('watchlists-panel');
   if (!watchlists || !watchlists.length) {
-    el.innerHTML = '<div class="panel-sub">No watchlist items yet. Save markets from the drawer.</div>';
+    el.innerHTML = '<div class="panel-sub">No watchlist items yet. Save markets from any signal.</div>';
     return;
   }
   watchlistItemMap = {};
