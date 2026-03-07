@@ -146,7 +146,12 @@ def health():
 
 
 @app.route("/")
-def index():
+def brief():
+    return render_template("brief.html")
+
+
+@app.route("/markets")
+def markets():
     return render_template("index.html")
 
 
