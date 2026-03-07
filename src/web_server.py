@@ -47,14 +47,19 @@ app = Flask(
 )
 
 # Config resolution order:
-# 1) SENTINEL_CONFIG env var (explicit override)
+# 1) SENTINEL_CONFIG env var (explicit override — resolved relative to ROOT_DIR)
 # 2) repo-local config.json (developer/local mode)
 # 3) config.example.json (safe defaults for hosted demo)
 _cfg_env = os.environ.get("SENTINEL_CONFIG", "").strip()
 _cfg_local = ROOT_DIR / "config.json"
 _cfg_example = ROOT_DIR / "config.example.json"
 if _cfg_env:
-    _cfg_path = _cfg_env
+    # Resolve relative paths against ROOT_DIR (not CWD) so Render's
+    # SENTINEL_CONFIG=config.example.json works regardless of working dir.
+    _cfg_candidate = Path(_cfg_env)
+    if not _cfg_candidate.is_absolute():
+        _cfg_candidate = ROOT_DIR / _cfg_candidate
+    _cfg_path = str(_cfg_candidate)
 elif _cfg_local.exists():
     _cfg_path = str(_cfg_local)
 elif _cfg_example.exists():

@@ -1,19 +1,22 @@
 # Market Sentinel Dependencies
 # Install with: pip install -r requirements.txt
+#
+# Versions pinned to major.minor to avoid surprise breakage on Render.
+# Bump these explicitly after testing.
 
 # Async HTTP client
-aiohttp>=3.9.0
+aiohttp>=3.9.0,<4.0
 
 # Web dashboard
-Flask>=3.0.0
-gunicorn>=22.0.0
+Flask>=3.0.0,<4.0
+gunicorn>=22.0.0,<24.0
 
 # Market/LLM helpers used by dashboard features
-requests>=2.31.0
-yfinance>=0.2.50
+requests>=2.31.0,<3.0
+yfinance>=0.2.50,<2.0
 
 # Anthropic SDK — required for Claude headline generation, outlook, and whale intelligence
-anthropic>=0.39.0
+anthropic>=0.39.0,<1.0
 
 
 # No other dependencies needed - uses Python stdlib for:
