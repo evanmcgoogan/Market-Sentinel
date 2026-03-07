@@ -327,8 +327,13 @@ class Database:
         # Apply per-connection performance settings.
         # synchronous=NORMAL is safe with WAL mode and significantly reduces fsync overhead.
         # busy_timeout is a belt-and-suspenders fallback beyond the connect timeout.
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=10000")
+        # Wrapped in try/except: these are optimisations, not requirements.
+        # A disk I/O hiccup shouldn't prevent the connection from being usable.
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+        except Exception:
+            pass
         try:
             yield conn
             conn.commit()

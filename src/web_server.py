@@ -71,7 +71,19 @@ config = load_config(_cfg_path)
 
 # Resolve DB path — Render sets SENTINEL_DB_PATH for persistent disk.
 _db_path_str = os.environ.get("SENTINEL_DB_PATH") or str(ROOT_DIR / config.db_path)
-db = Database(_db_path_str)
+
+# Ensure the DB directory exists (Render persistent disk may not be mounted yet).
+_db_dir = os.path.dirname(_db_path_str)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
+
+# Try primary DB; fall back to /tmp if the persistent disk has I/O issues.
+try:
+    db = Database(_db_path_str)
+except Exception as _db_exc:
+    _fallback_db = "/tmp/market_sentinel_fallback.db"
+    logger.warning(f"Primary DB at {_db_path_str} failed ({_db_exc}); falling back to {_fallback_db}")
+    db = Database(_fallback_db)
 
 # Read Anthropic key from config (or environment variable fallback)
 _anthropic_key = getattr(config, "anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
