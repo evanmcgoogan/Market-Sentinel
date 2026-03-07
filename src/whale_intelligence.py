@@ -28,6 +28,8 @@ from typing import List, Optional, Dict, Any, Tuple
 
 import requests
 
+from src.story_generator import _is_noise_market
+
 logger = logging.getLogger(__name__)
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
@@ -41,9 +43,10 @@ MIN_WHALE_TRADE = 5_000     # Minimum for whale wallet profiling
 CACHE_TTL = 600  # 10 minutes — whale positions don't change every 5 min
 
 # Keyword fragments identifying bot-dominated markets to exclude.
-# Intentionally SHORT: we only filter crypto binary bots and weather noise.
-# Sports, entertainment, and other "real event" markets stay in — large trades
-# on those markets are genuinely interesting whale activity.
+# Crypto binary bots and weather noise are caught here; sports/esports/pop-
+# culture markets are caught by _is_noise_market() from story_generator,
+# which is applied after trade parsing to keep the whale feed editorially
+# consistent with the Markets page.
 _EXCLUDE_TITLE = [
     "up or down", "bitcoin up", "eth up", "btc up", "sol up",
     " 5m", " 15m", " 1h ", "will it rain", "weather forecast",
@@ -618,6 +621,11 @@ class WhaleBrain:
         # 2. Parse all trades
         all_trades = [_parse_trade(r) for r in raw_trades]
         all_trades = [t for t in all_trades if t is not None]
+        # Remove sports / esports / pop-culture noise — same filter used by Markets page
+        pre_filter = len(all_trades)
+        all_trades = [t for t in all_trades if not _is_noise_market(t.market_name)]
+        if pre_filter != len(all_trades):
+            logger.info(f"WhaleBrain: filtered {pre_filter - len(all_trades)} noise markets (sports/esports/pop-culture)")
         logger.info(f"WhaleBrain: {len(all_trades)} trades passed parse filter")
 
         if not all_trades:
