@@ -111,6 +111,17 @@ if _claude_active:
         outlook_gen.load_from_db(db)
     except Exception as exc:
         logger.warning(f"Startup: outlook cache warmup failed (non-fatal): {exc}")
+    # Clear any stale forecast cache that contains a fallback/error message
+    try:
+        _cached_outlook = db.get_state("api_outlook_cache", default=None)
+        if _cached_outlook:
+            _cached_data = _cached_outlook.get("data", {})
+            _summary = _cached_data.get("outlook_summary", "")
+            if "unavailable" in _summary.lower() or "not configured" in _summary.lower():
+                db.set_state("api_outlook_cache", None)
+                logger.info("Startup: cleared stale forecast fallback from cache")
+    except Exception:
+        pass
 
 # Timestamp of the last force-run on /api/eval/truth.
 # Guards against concurrent/repeated calls saturating all gunicorn threads.
@@ -366,11 +377,16 @@ def api_forecast():
                 future = pool.submit(_do_compute)
                 data = future.result(timeout=90)
 
-            db.set_state("api_outlook_cache", {
-                "ts":   datetime.now(timezone.utc).isoformat(),
-                "data": data,
-            })
-            logger.info("Forecast cache refreshed")
+            # Only cache successful computations — never cache fallbacks
+            if data.get("_is_fallback"):
+                logger.warning("Forecast compute returned fallback — not caching")
+            else:
+                data.pop("_is_fallback", None)  # clean up internal flag
+                db.set_state("api_outlook_cache", {
+                    "ts":   datetime.now(timezone.utc).isoformat(),
+                    "data": data,
+                })
+                logger.info("Forecast cache refreshed")
         except concurrent.futures.TimeoutError:
             logger.error("Forecast cache refresh timed out after 90s")
             try: db.set_state("_debug_outlook_error", {"error": "Timeout after 90s", "ts": datetime.now(timezone.utc).isoformat()})
@@ -395,9 +411,12 @@ def api_forecast():
         except Exception:
             pass
 
-    # No cache (or force) — return fallback, compute in background
+    # No cache (or force) — return loading skeleton, compute in background
     threading.Thread(target=_compute_and_cache, daemon=True).start()
-    fallback = outlook_gen._fallback()
+    fallback = outlook_gen._fallback(
+        reason="Generating forecast — this may take up to 60 seconds on first load."
+    )
+    fallback.pop("_is_fallback", None)  # strip internal flag from client response
     fallback["live_prices"] = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "source": "yfinance", "assets": {},

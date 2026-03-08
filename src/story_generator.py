@@ -1853,7 +1853,12 @@ class OutlookGenerator:
             result = self._compute(db)
         except Exception as exc:
             logger.error(f"OutlookGenerator._compute error: {exc}", exc_info=True)
-            result = self._fallback()
+            result = self._fallback(
+                reason="Forecast temporarily unavailable — retrying automatically."
+            )
+            result["_is_fallback"] = True
+            # Don't cache failures — allow immediate retry on next request
+            return result
 
         # Persist every fresh (non-fallback) prediction for future grading
         if result.get("assets") and result.get("market_regime") != "NEUTRAL" or result.get("session_id"):
@@ -1978,7 +1983,9 @@ Return ONLY valid compact JSON (no whitespace, no markdown fences) in exactly th
 }}"""
 
         if not self._client:
-            return self._fallback()
+            fb = self._fallback()
+            fb["_is_fallback"] = True
+            return fb
 
         msg = self._client.messages.create(
             model=self.MODEL,
@@ -2051,8 +2058,18 @@ Return ONLY valid compact JSON (no whitespace, no markdown fences) in exactly th
         data["asset_order"]  = [a["ticker"] for a in OUTLOOK_ASSETS]
         return data
 
-    def _fallback(self) -> Dict:
-        """Return a skeleton structure when Claude is unavailable."""
+    def _fallback(self, reason: str = "") -> Dict:
+        """Return a skeleton structure when the outlook can't be computed.
+
+        Args:
+            reason: human-readable explanation shown in the UI.
+                    Defaults to a generic loading message.
+        """
+        if not reason:
+            if not self._client:
+                reason = "Outlook unavailable — Claude API not configured."
+            else:
+                reason = "Generating forecast — this may take up to 60 seconds on first load."
         assets = {}
         for a in OUTLOOK_ASSETS:
             assets[a["ticker"]] = {
@@ -2064,7 +2081,7 @@ Return ONLY valid compact JSON (no whitespace, no markdown fences) in exactly th
                         "confidence": 0, "confidence_label": "LOW", "drivers": []},
             }
         return {
-            "outlook_summary": "Outlook unavailable — Claude API not configured.",
+            "outlook_summary": reason,
             "market_regime": "NEUTRAL",
             "dominant_themes": [],
             "generated_note": "",
