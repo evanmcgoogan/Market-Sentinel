@@ -28,7 +28,10 @@ from typing import List, Optional, Dict, Any, Tuple
 
 import requests
 
-from src.story_generator import _is_noise_market
+try:
+    from src.story_generator import _is_noise_market
+except ImportError:
+    from story_generator import _is_noise_market
 
 logger = logging.getLogger(__name__)
 
