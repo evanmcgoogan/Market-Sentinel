@@ -55,6 +55,35 @@ _EXCLUDE_TITLE = [
     " 5m", " 15m", " 1h ", "will it rain", "weather forecast",
 ]
 
+# Keyword fragments for scoring market relevance / importance.
+_RELEVANCE_KEYWORDS: Dict[str, List[str]] = {
+    "geopolitics": [
+        "china", "russia", "ukraine", "taiwan", "nato", "sanctions",
+        "tariff", "trade war", "iran", "north korea", "india",
+        "middle east", "european union", "g7", "g20", "brics",
+    ],
+    "politics": [
+        "trump", "biden", "election", "president", "congress",
+        "senate", "governor", "democrat", "republican", "vote",
+        "primary", "cabinet", "impeach", "legislation", "poll",
+    ],
+    "conflict": [
+        "war", "invasion", "military", "ceasefire", "peace deal",
+        "attack", "bomb", "missile", "terror", "hostage",
+        "hamas", "hezbollah", "isis", "troops",
+    ],
+    "markets": [
+        "fed ", "interest rate", "inflation", "recession", "gdp",
+        "unemployment", "s&p", "nasdaq", "bitcoin", "crypto",
+        "oil price", "gold", "treasury", "default", "debt ceiling",
+    ],
+    "technology": [
+        "ai ", "artificial intelligence", "openai", "google",
+        "apple", "meta", "nvidia", "chip", "semiconductor",
+        "quantum", "spacex", "launch",
+    ],
+}
+
 
 # ── Data structures ───────────────────────────────────────────────────────────
 
@@ -478,6 +507,57 @@ def _calc_insider_score(
     return min(score, 100.0), signals
 
 
+def _importance_score(trade: WhaleTrade) -> float:
+    """Score 0–100 for how important a trade is for intelligence synthesis.
+
+    Factors: trade size (0-30), market relevance (0-25), recency (0-15),
+    extreme probability (0-15), conviction strength (0-15).
+    """
+    score = 0.0
+
+    # ── Trade size (0-30)
+    usd = trade.usd_value
+    if   usd >= 100_000: score += 30
+    elif usd >= 50_000:  score += 25
+    elif usd >= 25_000:  score += 20
+    elif usd >= 10_000:  score += 15
+    elif usd >= 5_000:   score += 10
+    else:                score += 5
+
+    # ── Market relevance via keyword matching (0-25)
+    title_lower = trade.market_name.lower()
+    best = 0
+    for keywords in _RELEVANCE_KEYWORDS.values():
+        hits = sum(1 for kw in keywords if kw in title_lower)
+        if hits:
+            best = max(best, min(25, 10 + hits * 5))
+    score += best
+
+    # ── Recency (0-15)
+    try:
+        mins = (datetime.now(timezone.utc) - trade.timestamp).total_seconds() / 60
+    except Exception:
+        mins = 999
+    if   mins < 15:  score += 15
+    elif mins < 60:  score += 12
+    elif mins < 180: score += 8
+    elif mins < 720: score += 4
+
+    # ── Extreme probability — high conviction (0-15)
+    p = trade.implied_prob
+    if   p >= 0.90 or p <= 0.10: score += 15
+    elif p >= 0.80 or p <= 0.20: score += 10
+    elif p >= 0.70 or p <= 0.30: score += 5
+
+    # ── Conviction strength — buying high or selling low (0-15)
+    if (trade.side == "BUY" and p >= 0.75) or (trade.side == "SELL" and p <= 0.25):
+        score += 15
+    elif (trade.side == "BUY" and p >= 0.60) or (trade.side == "SELL" and p <= 0.40):
+        score += 8
+
+    return min(score, 100.0)
+
+
 # ── WhaleBrain ────────────────────────────────────────────────────────────────
 
 class WhaleBrain:
@@ -684,13 +764,22 @@ class WhaleBrain:
         # 9. Build recent trades feed (top 20 by USD value, most recent first)
         recent_feed = sorted(feed_trades, key=lambda t: t.timestamp, reverse=True)[:20]
 
+        # 10. Score evidence trades by importance and select top 25
+        evidence = sorted(feed_trades, key=_importance_score, reverse=True)[:25]
+
+        # 11. Synthesize intelligence from all whale data
+        synthesis = self._synthesize_intelligence(market_flows, stories, evidence)
+
         elapsed = time.monotonic() - start
         logger.info(
             f"WhaleBrain: generated {len(stories)} stories, "
-            f"{len(market_flows)} market flows in {elapsed:.1f}s"
+            f"{len(market_flows)} market flows, synthesis in {elapsed:.1f}s"
         )
 
-        return self._build_payload(market_flows, stories, recent_feed)
+        return self._build_payload(
+            market_flows, stories, recent_feed,
+            synthesis=synthesis, evidence=evidence,
+        )
 
     def _aggregate_market_flows(self, trades: List[WhaleTrade]) -> List[MarketFlow]:
         """Group trades by conditionId and compute directional flow."""
@@ -946,6 +1035,269 @@ Style: Bloomberg terminal analyst. Specific. Use exact dollar amounts and percen
             "though the position size merits tracking."
         )
 
+    # ── Intelligence synthesis ────────────────────────────────────────────────
+
+    def _synthesize_intelligence(
+        self,
+        flows: List[MarketFlow],
+        stories: List["WhaleStory"],
+        evidence: List[WhaleTrade],
+    ) -> Dict:
+        """Produce a structured intelligence synthesis from whale data.
+
+        Uses Claude Haiku when available; falls back to algorithmic synthesis.
+        """
+        if not self._claude or not evidence:
+            return self._fallback_synthesis(flows, stories, evidence)
+
+        # Format flows
+        flow_lines = []
+        for f in flows[:10]:
+            flow_lines.append(
+                f"  • {f.market_name[:70]} — "
+                f"${f.total_flow:,.0f} total, {f.net_direction} {f.net_pct}%, "
+                f"{f.unique_wallets} wallets, {f.trade_count} trades"
+            )
+
+        # Format indexed evidence trades
+        trade_lines = []
+        for i, t in enumerate(evidence[:15]):
+            trade_lines.append(
+                f"  [{i}] {t.side} {t.outcome} — "
+                f"\"{t.market_name[:65]}\" — "
+                f"${t.usd_value:,.0f} at {t.implied_prob:.0%} ({t.relative_time})"
+            )
+
+        # Format whale profiles
+        whale_lines = []
+        for s in stories[:6]:
+            p = s.profile
+            whale_lines.append(
+                f"  • {p.display_name}: ${p.total_volume:,.0f} vol, "
+                f"{p.unique_markets} markets, insider score {s.insider_score:.0f}/100"
+            )
+
+        flows_str   = "\n".join(flow_lines)  or "  (no flow data)"
+        trades_str  = "\n".join(trade_lines) or "  (no trades)"
+        whales_str  = "\n".join(whale_lines) or "  (no profiles)"
+
+        prompt = f"""WHALE INTELLIGENCE SYNTHESIS
+
+You are a prediction market intelligence analyst producing a Bloomberg-style briefing. Below is the latest whale trading data from Polymarket. Synthesize this into actionable intelligence.
+
+SMART MONEY FLOWS (by market):
+{flows_str}
+
+TOP TRADES (indexed for reference):
+{trades_str}
+
+TOP WHALE PROFILES:
+{whales_str}
+
+Produce a JSON synthesis with these sections:
+
+1. "brief": {{
+     "equity_bias": "BULLISH" | "BEARISH" | "MIXED",
+     "risk_appetite": "RISK-ON" | "RISK-OFF" | "NEUTRAL",
+     "geopolitical_risk": "ELEVATED" | "MODERATE" | "LOW",
+     "confidence": number 0-100,
+     "time_horizon": "HOURS" | "DAYS" | "WEEKS",
+     "synthesis": "2-3 sentence summary of what whale money is telling us. Be specific with dollar amounts and market names."
+   }}
+
+2. "lenses": [
+     {{
+       "title": "short title (4-8 words)",
+       "body": "1-2 sentence intelligence assessment with specific numbers",
+       "direction": "BULLISH" | "BEARISH" | "NEUTRAL",
+       "confidence": number 0-100,
+       "trade_refs": [indices from TOP TRADES]
+     }}
+   ] — 3 to 5 lenses, each about a different theme
+
+3. "clusters": [
+     {{
+       "theme": "cluster name (e.g. 'US Election Positioning')",
+       "summary": "1-2 sentence assessment",
+       "direction": "BULLISH" | "BEARISH" | "MIXED",
+       "total_flow": estimated dollar amount,
+       "trade_refs": [indices from TOP TRADES]
+     }}
+   ] — 2 to 4 thematic clusters
+
+4. "consensus": ["what whales agree on — specific", ...] — 2 to 4 items
+
+5. "tensions": ["where whales disagree — specific", ...] — 1 to 3 items
+
+Return ONLY valid JSON. No markdown fences. No commentary.
+{{"brief":...,"lenses":[...],"clusters":[...],"consensus":[...],"tensions":[...]}}
+
+Style: Bloomberg intelligence analyst. Specific. Use exact dollar amounts. Forward-looking implications."""
+
+        try:
+            resp = self._claude.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.content[0].text.strip()
+            # Strip markdown fences if present
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                raw = parts[1]
+                if raw.lower().startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+            result = json.loads(raw)
+
+            # Validate structure — fill missing top-level keys
+            if "brief" not in result or not isinstance(result["brief"], dict):
+                result["brief"] = self._empty_synthesis()["brief"]
+            for key in ("lenses", "clusters", "consensus", "tensions"):
+                if key not in result or not isinstance(result[key], list):
+                    result[key] = []
+
+            logger.info("WhaleBrain: synthesis generated via Claude")
+            return result
+
+        except Exception as exc:
+            logger.warning(f"WhaleBrain synthesis Claude call failed: {exc}")
+            return self._fallback_synthesis(flows, stories, evidence)
+
+    def _fallback_synthesis(
+        self,
+        flows: List[MarketFlow],
+        stories: List["WhaleStory"],
+        evidence: List[WhaleTrade],
+    ) -> Dict:
+        """Algorithmic synthesis when Claude is unavailable."""
+        total_buy  = sum(f.buy_flow for f in flows)
+        total_sell = sum(f.sell_flow for f in flows)
+        total      = total_buy + total_sell
+        buy_pct    = (total_buy / total * 100) if total > 0 else 50
+
+        if   buy_pct >= 60: equity_bias = "BULLISH"
+        elif buy_pct <= 40: equity_bias = "BEARISH"
+        else:               equity_bias = "MIXED"
+
+        large = sum(1 for t in (evidence or []) if t.usd_value >= 25_000)
+        risk_appetite = "RISK-ON" if large >= 3 else "NEUTRAL"
+
+        geo_kw = _RELEVANCE_KEYWORDS.get("conflict", [])
+        geo_hits = sum(
+            1 for t in (evidence or [])
+            if any(kw in t.market_name.lower() for kw in geo_kw)
+        )
+        geo_risk = (
+            "ELEVATED" if geo_hits >= 3
+            else "MODERATE" if geo_hits >= 1
+            else "LOW"
+        )
+
+        top_score = (
+            max((s.insider_score for s in stories), default=0) if stories else 0
+        )
+        confidence = min(85, max(15, int(top_score * 0.7 + len(flows) * 3)))
+
+        syn = (
+            f"Whale activity shows {equity_bias.lower()} positioning with "
+            f"${total:,.0f} in tracked flow across {len(flows)} markets. "
+        )
+        if buy_pct >= 60:
+            syn += f"Buy-side dominance at {buy_pct:.0f}% suggests conviction."
+        elif buy_pct <= 40:
+            syn += f"Sell-side pressure at {100 - buy_pct:.0f}% suggests hedging."
+        else:
+            syn += "Flow is balanced — no clear directional consensus."
+
+        # Lenses from top flows
+        lenses = []
+        for f in flows[:4]:
+            lenses.append({
+                "title": f.market_name[:55],
+                "body": (
+                    f"${f.total_flow:,.0f} flow from {f.unique_wallets} wallets. "
+                    f"Net {f.net_direction.lower()} at {f.net_pct:.0f}%."
+                ),
+                "direction": "BULLISH" if f.net_direction == "BUY" else "BEARISH",
+                "confidence": int(abs(f.net_pct - 50) * 1.8),
+                "trade_refs": [],
+            })
+
+        # Clusters
+        clusters = []
+        if flows:
+            clusters.append({
+                "theme": "Primary Market Activity",
+                "summary": (
+                    f"Whale money concentrated across top "
+                    f"{min(3, len(flows))} markets by flow volume."
+                ),
+                "direction": equity_bias,
+                "total_flow": round(sum(f.total_flow for f in flows[:3]), 2),
+                "trade_refs": [],
+            })
+
+        # Consensus
+        buy_ct  = sum(1 for f in flows if f.net_direction == "BUY")
+        sell_ct = len(flows) - buy_ct
+        consensus = []
+        if buy_pct >= 55:
+            consensus.append(
+                f"Net buying across {buy_ct}/{len(flows)} tracked markets"
+            )
+        elif buy_pct <= 45:
+            consensus.append(
+                f"Net selling across {sell_ct}/{len(flows)} tracked markets"
+            )
+        else:
+            consensus.append(
+                "Whale positioning is divided — no clear consensus"
+            )
+
+        # Tensions
+        tensions = []
+        buy_mkts  = [f for f in flows if f.net_direction == "BUY"]
+        sell_mkts = [f for f in flows if f.net_direction == "SELL"]
+        if buy_mkts and sell_mkts:
+            tensions.append(
+                f"Buying {buy_mkts[0].market_name[:40]} while selling "
+                f"{sell_mkts[0].market_name[:40]}"
+            )
+
+        return {
+            "brief": {
+                "equity_bias":      equity_bias,
+                "risk_appetite":    risk_appetite,
+                "geopolitical_risk": geo_risk,
+                "confidence":       confidence,
+                "time_horizon":     "DAYS",
+                "synthesis":        syn,
+            },
+            "lenses":    lenses,
+            "clusters":  clusters,
+            "consensus": consensus,
+            "tensions":  tensions,
+        }
+
+    def _empty_synthesis(self) -> Dict:
+        """Empty synthesis skeleton for cold-start / no-data states."""
+        return {
+            "brief": {
+                "equity_bias":      "MIXED",
+                "risk_appetite":    "NEUTRAL",
+                "geopolitical_risk": "MODERATE",
+                "confidence":       0,
+                "time_horizon":     "DAYS",
+                "synthesis":        "Awaiting whale trade data to generate intelligence synthesis.",
+            },
+            "lenses":    [],
+            "clusters":  [],
+            "consensus": [],
+            "tensions":  [],
+        }
+
     # ── Payload builders ─────────────────────────────────────────────────────
 
     def _build_payload(
@@ -953,14 +1305,31 @@ Style: Bloomberg terminal analyst. Specific. Use exact dollar amounts and percen
         flows: List[MarketFlow],
         stories: List[WhaleStory],
         recent_trades: List[WhaleTrade],
+        synthesis: Dict = None,
+        evidence: List[WhaleTrade] = None,
     ) -> Dict:
-        profiles = [s.to_dict() for s in stories]
+        profiles   = [s.to_dict() for s in stories]
         total_flow = sum(f.total_flow for f in flows)
-        top_score = max((s.insider_score for s in stories), default=0)
+        top_score  = max((s.insider_score for s in stories), default=0)
+
+        evidence_dicts = []
+        if evidence:
+            evidence_dicts = [
+                {
+                    **t.to_feed_dict(),
+                    "idx": i,
+                    "condition_id": t.condition_id,
+                    "importance_score": round(_importance_score(t), 1),
+                }
+                for i, t in enumerate(evidence)
+            ]
+
         return {
-            "market_flows":   [f.to_dict() for f in flows],
-            "whale_profiles": profiles,
-            "recent_trades":  [t.to_feed_dict() for t in recent_trades],
+            "market_flows":    [f.to_dict() for f in flows],
+            "whale_profiles":  profiles,
+            "recent_trades":   [t.to_feed_dict() for t in recent_trades],
+            "evidence_trades": evidence_dicts,
+            "synthesis":       synthesis or self._empty_synthesis(),
             "stats": {
                 "total_whales":      len(stories),
                 "total_flow_volume": round(total_flow, 2),
@@ -981,9 +1350,11 @@ Style: Bloomberg terminal analyst. Specific. Use exact dollar amounts and percen
 
     def _empty_payload(self) -> Dict:
         return {
-            "market_flows":   [],
-            "whale_profiles": [],
-            "recent_trades":  [],
+            "market_flows":    [],
+            "whale_profiles":  [],
+            "recent_trades":   [],
+            "evidence_trades": [],
+            "synthesis":       self._empty_synthesis(),
             "stats": {
                 "total_whales":      0,
                 "total_flow_volume": 0,

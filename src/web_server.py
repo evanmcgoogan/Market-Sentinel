@@ -281,9 +281,24 @@ def api_whales():
 
     def _empty_payload():
         return {
-            "market_flows":   [],
-            "whale_profiles": [],
-            "recent_trades":  [],
+            "market_flows":    [],
+            "whale_profiles":  [],
+            "recent_trades":   [],
+            "evidence_trades": [],
+            "synthesis": {
+                "brief": {
+                    "equity_bias":       "MIXED",
+                    "risk_appetite":     "NEUTRAL",
+                    "geopolitical_risk": "MODERATE",
+                    "confidence":        0,
+                    "time_horizon":      "DAYS",
+                    "synthesis":         "Scanning Polymarket for whale activity — intelligence brief generating…",
+                },
+                "lenses":    [],
+                "clusters":  [],
+                "consensus": [],
+                "tensions":  [],
+            },
             "stats": {
                 "total_whales":      0,
                 "total_flow_volume": 0,
