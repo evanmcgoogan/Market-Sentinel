@@ -39,6 +39,9 @@ from alerts import AlertManager
 from news_monitor import NewsMonitor
 from whale_tracker import WhaleTracker
 from orderbook import OrderBookAnalyzer
+from market_data import MarketDataProvider
+from forecast_engine import ForecastEngine
+from forecast_evaluator import ForecastEvaluator
 
 
 # Configure logging
@@ -57,6 +60,11 @@ STATS_INTERVAL = timedelta(minutes=30)
 
 # How often to run performance labeling/metrics jobs
 FEEDBACK_INTERVAL = timedelta(minutes=30)
+
+# Forecast engine scheduling
+FORECAST_INTERVAL = timedelta(minutes=15)
+EVALUATION_INTERVAL = timedelta(hours=1)
+WEIGHT_UPDATE_INTERVAL = timedelta(hours=24)
 
 # How often to run full DB compaction
 COMPACTION_INTERVAL = timedelta(hours=24)
@@ -116,7 +124,16 @@ class MarketSentinel:
         self._last_feedback = datetime.min.replace(tzinfo=timezone.utc)
         self._last_autotune = datetime.min.replace(tzinfo=timezone.utc)
         self._last_compaction = datetime.min.replace(tzinfo=timezone.utc)
+        self._last_forecast = datetime.min.replace(tzinfo=timezone.utc)
+        self._last_evaluation = utcnow()
+        self._last_weight_update = utcnow()
         self._cycle_count = 0
+
+        # Forecast engine components
+        _api_key = getattr(config, "anthropic_api_key", "") or ""
+        self._market_data = MarketDataProvider(self.db)
+        self._forecast_engine = ForecastEngine(self._market_data, self.db, api_key=_api_key)
+        self._forecast_evaluator = ForecastEvaluator(api_key=_api_key)
         self._cached_markets: Dict[str, List[Market]] = {
             "polymarket": [],
             "kalshi": [],
@@ -481,6 +498,58 @@ class MarketSentinel:
                 f"news_cached={news_count}"
             )
 
+    def _maybe_generate_forecast(self):
+        """Generate deterministic forecast every FORECAST_INTERVAL."""
+        now = utcnow()
+        if (now - self._last_forecast) < FORECAST_INTERVAL:
+            return
+        self._last_forecast = now
+        try:
+            result = self._forecast_engine.generate(self.db)
+            asset_count = len(result.get("assets", {}))
+            regime = result.get("market_regime", "?")
+            logger.info(
+                f"Forecast generated: {asset_count} assets, regime={regime}, "
+                f"session={result.get('session_id', '?')[:8]}"
+            )
+            # Invalidate web server cache by updating state
+            self.db.set_state("api_outlook_cache", {
+                "ts": now.replace(tzinfo=timezone.utc).isoformat(),
+                "data": result,
+            })
+        except Exception as e:
+            logger.error(f"Forecast generation failed: {e}")
+
+    def _maybe_evaluate_outcomes(self):
+        """Grade pending forecast outcomes every EVALUATION_INTERVAL."""
+        now = utcnow()
+        if (now - self._last_evaluation) < EVALUATION_INTERVAL:
+            return
+        self._last_evaluation = now
+        try:
+            new_grades = self._forecast_evaluator.grade_pending(
+                self.db, self._market_data
+            )
+            if new_grades > 0:
+                logger.info(f"Forecast evaluation: {new_grades} new outcomes graded")
+        except Exception as e:
+            logger.error(f"Forecast evaluation failed: {e}")
+
+    def _maybe_update_weights(self):
+        """Update signal weights every WEIGHT_UPDATE_INTERVAL."""
+        now = utcnow()
+        if (now - self._last_weight_update) < WEIGHT_UPDATE_INTERVAL:
+            return
+        self._last_weight_update = now
+        try:
+            report = self._forecast_evaluator.update_weights(self.db)
+            status = report.get("status", "?")
+            logger.info(f"Weight update: status={status}")
+            # Reload weights in engine
+            self._forecast_engine._load_weights()
+        except Exception as e:
+            logger.error(f"Weight update failed: {e}")
+
     async def _run_cycle(self):
         """Run one monitoring cycle."""
         try:
@@ -512,6 +581,11 @@ class MarketSentinel:
             self._maybe_cleanup()
             self._maybe_log_stats()
             self._maybe_feedback_loop()
+
+            # Forecast engine scheduling
+            self._maybe_generate_forecast()
+            self._maybe_evaluate_outcomes()
+            self._maybe_update_weights()
 
         except Exception as e:
             logger.error(f"Error in monitoring cycle: {e}")

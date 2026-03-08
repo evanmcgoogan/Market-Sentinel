@@ -202,14 +202,12 @@
     }
     .direction-arrow.up   { color: var(--up); }
     .direction-arrow.down { color: var(--down); }
-    .direction-arrow.none { color: var(--neutral); opacity: .4; }
     .direction-word {
       font-size: .6rem; font-weight: 700; letter-spacing: .1em;
       text-transform: uppercase;
     }
     .direction-word.up   { color: var(--up); }
     .direction-word.down { color: var(--down); }
-    .direction-word.none { color: var(--neutral); }
 
     /* Magnitude */
     .magnitude-row {
@@ -691,16 +689,19 @@ function buildCard(ticker, assetData) {
   if (!pred) return '';
   const live = livePriceMap[ticker] || {};
 
-  const dir   = (pred.direction || '—').toUpperCase();
+  // Deterministic engine always outputs UP or DOWN — never "—"
+  const dir   = (pred.direction || 'UP').toUpperCase();
   const isUp  = dir === 'UP';
   const isDown = dir === 'DOWN';
-  const dirClass = isUp ? 'up' : isDown ? 'down' : 'none';
-  const arrow = isUp ? '↑' : isDown ? '↓' : '—';
+  const dirClass = isUp ? 'up' : 'down';
+  const arrow = isUp ? '↑' : '↓';
   const mag   = pred.magnitude_score || 1;
   const magLabel = pred.magnitude_label || 'SMALL';
-  const conf  = pred.confidence || 0;
+  const conf  = Math.max(pred.confidence || 15, 15);
   const confLabel = pred.confidence_label || 'LOW';
   const drivers = pred.drivers || [];
+  const expectedReturn = pred.expected_return || 0;
+  const returnStr = (expectedReturn >= 0 ? '+' : '') + expectedReturn.toFixed(2) + '%';
   const pipCount = MAGNITUDE_PIPS[magLabel] || 1;
   const livePrice = (live.price != null) ? Number(live.price).toLocaleString(undefined, {maximumFractionDigits: 4}) : '—';
   const ageLabel = fmtLiveAge(live.age_minutes);
@@ -737,6 +738,7 @@ function buildCard(ticker, assetData) {
         <span class="magnitude-label-text">Magnitude</span>
         <div class="magnitude-pips">${pips}</div>
         <div class="magnitude-badge ${dirClass}">${magLabel}</div>
+        <span class="expected-return ${dirClass}" style="margin-left:auto;font-size:.72rem;font-weight:600;font-family:var(--mono)">${returnStr}</span>
       </div>
 
       <div class="confidence-row">
@@ -750,7 +752,7 @@ function buildCard(ticker, assetData) {
 
       <div class="drivers-row">
         <div class="drivers-label">Key Drivers</div>
-        ${driverHtml || '<div style="font-size:.75rem;color:var(--text-3);font-style:italic">No signal data</div>'}
+        ${driverHtml || '<div class="driver-item" style="font-size:.75rem;color:var(--text-3)">Low conviction — baseline + risk proxies</div>'}
       </div>
     </div>`;
 }

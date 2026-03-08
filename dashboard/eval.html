@@ -235,6 +235,49 @@
       </div>
       <div class="rows" id="otr-reflection" style="margin-top:10px"></div>
     </section>
+
+    <section class="panel" id="forecast-evaluation">
+      <h3>Forecast Engine Evaluation</h3>
+      <div class="rows" id="fe-summary"></div>
+      <div class="panel-grid" style="margin-top:10px">
+        <article class="panel">
+          <h3>Calibration Curve (Forecast)</h3>
+          <div style="position:relative;width:100%;aspect-ratio:2/1.2">
+            <svg id="fe-cal-svg" viewBox="0 0 500 300" style="width:100%;height:100%;background:var(--surface-2);border-radius:6px">
+              <line x1="50" y1="10" x2="50" y2="270" stroke="var(--border-1)" stroke-width="1"/>
+              <line x1="50" y1="270" x2="490" y2="270" stroke="var(--border-1)" stroke-width="1"/>
+              <line x1="50" y1="270" x2="490" y2="10" stroke="var(--text-3)" stroke-width="1" stroke-dasharray="6,4" opacity="0.4"/>
+              <text x="270" y="295" fill="var(--text-3)" font-size="10" text-anchor="middle">Predicted Confidence</text>
+              <text x="15" y="140" fill="var(--text-3)" font-size="10" text-anchor="middle" transform="rotate(-90,15,140)">Actual Accuracy</text>
+            </svg>
+          </div>
+        </article>
+        <article class="panel">
+          <h3>Signal Weight Quality</h3>
+          <div class="table-scroll">
+            <table class="table" id="fe-weights-table">
+              <thead><tr><th>Signal Family</th><th>Current</th><th>Default</th><th>Quality</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+      <div class="panel-grid" style="margin-top:10px">
+        <article class="panel">
+          <h3>Per-Asset Brier Scores</h3>
+          <div class="table-scroll">
+            <table class="table" id="fe-asset-table">
+              <thead><tr><th>Asset</th><th>Dir. Acc</th><th>Brier</th><th>Calls</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="panel">
+          <h3>Baseline Comparison</h3>
+          <div class="rows" id="fe-baseline"></div>
+        </article>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -433,14 +476,117 @@
       }
     }
 
+    // ── Forecast Evaluation ──────────────────────────────────────────────
+    function renderForecastEvaluation(data) {
+      const stats = data?.stats || {};
+      const overall = stats.overall || {};
+      const byHorizon = stats.by_horizon || {};
+      const byAsset = stats.by_asset || {};
+      const calibration = stats.calibration || [];
+      const weights = data?.current_weights || {};
+      const defaults = data?.default_weights || {};
+      const quality = data?.driver_quality || {};
+      const baseline = data?.vs_baseline || {};
+      const confMod = data?.confidence_modifier || 0;
+
+      // Summary
+      const h24 = byHorizon['24h'] || {};
+      const h48 = byHorizon['48h'] || {};
+      $('fe-summary').innerHTML = [
+        metricRow('Total Graded Outcomes', overall.total || 0, `Direction Accuracy: ${fmtPct(overall.avg_direction_acc)}`),
+        metricRow('Avg Brier Score', fmtNum(overall.avg_brier, 4), `Log Loss: ${fmtNum(overall.avg_log_loss, 4)}`),
+        metricRow('24h Horizon', h24.total ? `${fmtPct(h24.avg_direction_acc)} dir · Brier ${fmtNum(h24.avg_brier, 4)}` : '—', `${h24.total || 0} graded`),
+        metricRow('48h Horizon', h48.total ? `${fmtPct(h48.avg_direction_acc)} dir · Brier ${fmtNum(h48.avg_brier, 4)}` : '—', `${h48.total || 0} graded`),
+        metricRow('Confidence Modifier', confMod === 0 ? 'None' : `${confMod > 0 ? '+' : ''}${confMod}pp`, confMod < 0 ? 'Cooldown active' : 'Normal'),
+      ].join('');
+
+      // Calibration curve
+      if (calibration.length > 0) {
+        const svg = $('fe-cal-svg');
+        const w = 440, h = 260, ox = 50, oy = 10;
+        let circles = '';
+        calibration.forEach(bin => {
+          const pred = (bin.avg_predicted_confidence || 0) / 100;
+          const actual = bin.actual_accuracy || 0;
+          const cx = ox + pred * w;
+          const cy = oy + (1 - actual) * h;
+          const r = Math.max(4, Math.min(12, Math.sqrt(bin.count || 1) * 2));
+          circles += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="var(--accent)" opacity="0.8"/>`;
+          circles += `<text x="${cx}" y="${cy - r - 4}" fill="var(--text-2)" font-size="9" text-anchor="middle">${(actual * 100).toFixed(0)}%</text>`;
+        });
+        // Keep existing elements, append circles
+        const existing = svg.innerHTML;
+        svg.innerHTML = existing + circles;
+      }
+
+      // Weights table
+      const familyOrder = ['prediction_market', 'whale', 'momentum', 'cross_asset', 'news_sentiment'];
+      const familyLabels = {
+        prediction_market: 'Prediction Markets', whale: 'Whale Flow',
+        momentum: 'Momentum', cross_asset: 'Cross-Asset', news_sentiment: 'News Sentiment'
+      };
+      const weightRows = familyOrder.map(fam => {
+        const cur = weights[fam] || 0;
+        const def = defaults[fam] || 0;
+        const q = quality[fam];
+        const qStr = q != null ? Number(q).toFixed(3) : '—';
+        const delta = cur - def;
+        const deltaStr = delta > 0 ? `+${(delta*100).toFixed(1)}pp` : `${(delta*100).toFixed(1)}pp`;
+        return `<tr>
+          <td>${familyLabels[fam] || fam}</td>
+          <td class="mono">${(cur*100).toFixed(1)}% <span style="color:var(--text-3);font-size:.7rem">${deltaStr}</span></td>
+          <td class="mono">${(def*100).toFixed(1)}%</td>
+          <td class="mono">${qStr}</td>
+        </tr>`;
+      }).join('');
+      $('fe-weights-table').querySelector('tbody').innerHTML = weightRows || '<tr><td colspan="4" class="muted">No weight data yet.</td></tr>';
+
+      // Per-asset Brier
+      const fixedOrder = ['SPY','QQQ','VIX','GLD','SLV','WTI','COPX','DXY','TLT','BTC','ETH','ITA'];
+      const assetRows = fixedOrder
+        .filter(t => byAsset[t])
+        .map(t => {
+          const v = byAsset[t];
+          const cls = accClass(Number(v.avg_direction_acc || 0));
+          return `<tr>
+            <td class="mono">${t}</td>
+            <td class="${cls}">${fmtPct(v.avg_direction_acc)}</td>
+            <td class="mono">${fmtNum(v.avg_brier, 4)}</td>
+            <td class="mono">${v.total || 0}</td>
+          </tr>`;
+        }).join('');
+      $('fe-asset-table').querySelector('tbody').innerHTML = assetRows || '<tr><td colspan="4" class="muted">No graded forecast data yet.</td></tr>';
+
+      // Baseline comparison
+      $('fe-baseline').innerHTML = [
+        metricRow('Model Brier', fmtNum(baseline.model_brier, 4), baseline.model_better_than_neutral ? 'Better than neutral' : 'Worse than neutral'),
+        metricRow('Neutral Baseline Brier', fmtNum(baseline.neutral_brier, 4), 'Always predict 50%'),
+        metricRow('Model Direction Accuracy', fmtPct(baseline.model_direction_accuracy), `${(overall.total_correct || 0)} / ${overall.total || 0} correct`),
+      ].join('');
+    }
+
+    async function loadForecastEvaluation() {
+      try {
+        const res = await fetch('/api/forecast/evaluation');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderForecastEvaluation(data);
+      } catch (err) {
+        $('fe-summary').innerHTML = `<div class="row"><div class="name">Forecast Evaluation</div><div class="num status-bad">Failed to load (${err.message})</div></div>`;
+      }
+    }
+
     $('refresh-btn').addEventListener('click', async () => {
       await loadTruth(true);
       await loadOutlookTrackRecord();
+      await loadForecastEvaluation();
     });
     loadTruth(false);
     loadOutlookTrackRecord();
+    loadForecastEvaluation();
     setInterval(() => loadTruth(false), 60_000);
     setInterval(() => loadOutlookTrackRecord(), 15 * 60_000);
+    setInterval(() => loadForecastEvaluation(), 15 * 60_000);
   </script>
 </body>
 </html>

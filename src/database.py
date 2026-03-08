@@ -292,6 +292,65 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_outlook_grades_time
                 ON outlook_grades(graded_at DESC);
+
+                -- Asset price bars: cached daily prices for market data truth layer
+                CREATE TABLE IF NOT EXISTS asset_price_bars (
+                    ticker    TEXT NOT NULL,
+                    bar_date  TEXT NOT NULL,          -- YYYY-MM-DD
+                    open      REAL,
+                    high      REAL,
+                    low       REAL,
+                    close     REAL NOT NULL,
+                    volume    REAL,
+                    source    TEXT DEFAULT 'yfinance',
+                    fetched_at TEXT NOT NULL,
+                    UNIQUE(ticker, bar_date)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_price_bars_lookup
+                ON asset_price_bars(ticker, bar_date DESC);
+
+                -- Forecast asset calls: one row per asset per horizon per forecast
+                CREATE TABLE IF NOT EXISTS forecast_asset_calls (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id     TEXT NOT NULL,
+                    ticker         TEXT NOT NULL,
+                    horizon        TEXT NOT NULL,       -- '24h' or '48h'
+                    direction      TEXT NOT NULL,       -- 'UP' or 'DOWN'
+                    magnitude      TEXT NOT NULL,       -- 'SMALL','MODERATE','LARGE','MAJOR'
+                    confidence     INTEGER NOT NULL,    -- 0-100
+                    expected_return REAL,
+                    p_up           REAL,
+                    p_down         REAL,
+                    p_flat         REAL,
+                    drivers_json   TEXT,                -- JSON array of driver objects
+                    generated_at   TEXT NOT NULL,
+                    UNIQUE(session_id, ticker, horizon)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_forecast_calls_session
+                ON forecast_asset_calls(session_id);
+
+                CREATE INDEX IF NOT EXISTS idx_forecast_calls_ticker
+                ON forecast_asset_calls(ticker, generated_at DESC);
+
+                -- Forecast asset outcomes: graded results with proper scoring
+                CREATE TABLE IF NOT EXISTS forecast_asset_outcomes (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    call_id           INTEGER NOT NULL REFERENCES forecast_asset_calls(id),
+                    graded_at         TEXT NOT NULL,
+                    price_start       REAL NOT NULL,
+                    price_end         REAL NOT NULL,
+                    actual_return_pct REAL NOT NULL,
+                    direction_correct INTEGER NOT NULL,  -- 1 or 0
+                    magnitude_correct INTEGER NOT NULL,  -- 1 or 0
+                    brier_score       REAL,
+                    log_loss          REAL,
+                    UNIQUE(call_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_forecast_outcomes_graded
+                ON forecast_asset_outcomes(graded_at DESC);
             """)
             self._ensure_schema_updates(conn)
 
@@ -3285,3 +3344,205 @@ class Database:
         with self._get_conn() as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM outlook_predictions").fetchone()
         return row["n"] if row else 0
+
+    # ==================== Asset Price Bars ====================
+
+    def upsert_price_bars(self, bars: List[Dict[str, Any]]) -> int:
+        """Bulk upsert daily price bars. Returns count of rows written."""
+        if not bars:
+            return 0
+        now_str = _utcnow().isoformat()
+        with self._get_conn() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO asset_price_bars
+                    (ticker, bar_date, open, high, low, close, volume, source, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        b["ticker"], b["bar_date"],
+                        b.get("open"), b.get("high"), b.get("low"), b["close"],
+                        b.get("volume"), b.get("source", "yfinance"), now_str,
+                    )
+                    for b in bars
+                ],
+            )
+        return len(bars)
+
+    def get_price_bars(
+        self, ticker: str, start_date: str, end_date: str
+    ) -> List[Dict[str, Any]]:
+        """Return cached daily bars for a ticker in [start_date, end_date]."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT ticker, bar_date, open, high, low, close, volume, source
+                FROM asset_price_bars
+                WHERE ticker = ? AND bar_date >= ? AND bar_date <= ?
+                ORDER BY bar_date ASC
+                """,
+                (ticker, start_date, end_date),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_latest_price_bar(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent cached price bar for a ticker."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT ticker, bar_date, open, high, low, close, volume, source, fetched_at
+                FROM asset_price_bars
+                WHERE ticker = ?
+                ORDER BY bar_date DESC LIMIT 1
+                """,
+                (ticker,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ==================== Forecast Asset Calls & Outcomes ====================
+
+    def save_forecast_calls(self, session_id: str, generated_at: str, calls: List[Dict]) -> int:
+        """Persist per-asset forecast calls for a generation session. Returns rows written."""
+        if not calls:
+            return 0
+        with self._get_conn() as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO forecast_asset_calls
+                    (session_id, ticker, horizon, direction, magnitude, confidence,
+                     expected_return, p_up, p_down, p_flat, drivers_json, generated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        session_id, c["ticker"], c["horizon"], c["direction"],
+                        c["magnitude"], c["confidence"], c.get("expected_return"),
+                        c.get("p_up"), c.get("p_down"), c.get("p_flat"),
+                        json.dumps(c.get("drivers", [])), generated_at,
+                    )
+                    for c in calls
+                ],
+            )
+        return len(calls)
+
+    def get_ungraded_forecast_calls(self, horizon: str) -> List[Dict[str, Any]]:
+        """Return forecast_asset_calls that are old enough for grading but lack outcomes."""
+        buffer_hours = 25 if horizon == "24h" else 49
+        cutoff = (_utcnow() - timedelta(hours=buffer_hours)).isoformat()
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.id, c.session_id, c.ticker, c.horizon, c.direction,
+                       c.magnitude, c.confidence, c.expected_return,
+                       c.p_up, c.p_down, c.p_flat, c.drivers_json, c.generated_at
+                FROM forecast_asset_calls c
+                WHERE c.generated_at <= ?
+                  AND c.horizon = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM forecast_asset_outcomes o WHERE o.call_id = c.id
+                  )
+                ORDER BY c.generated_at DESC
+                LIMIT 500
+                """,
+                (cutoff, horizon),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_forecast_outcome(self, outcome: Dict[str, Any]) -> bool:
+        """Persist a single graded outcome for a forecast call."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                INSERT OR IGNORE INTO forecast_asset_outcomes
+                    (call_id, graded_at, price_start, price_end, actual_return_pct,
+                     direction_correct, magnitude_correct, brier_score, log_loss)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    outcome["call_id"], outcome["graded_at"],
+                    outcome["price_start"], outcome["price_end"],
+                    outcome["actual_return_pct"],
+                    outcome["direction_correct"], outcome["magnitude_correct"],
+                    outcome.get("brier_score"), outcome.get("log_loss"),
+                ),
+            ).rowcount
+        return rows > 0
+
+    def get_recent_forecast_outcomes(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return recent outcomes joined with their call data for weight learning."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT o.*, c.ticker, c.horizon, c.direction, c.magnitude,
+                       c.confidence, c.drivers_json, c.generated_at AS call_generated_at
+                FROM forecast_asset_outcomes o
+                JOIN forecast_asset_calls c ON c.id = o.call_id
+                ORDER BY o.graded_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_forecast_evaluation_stats(self) -> Dict[str, Any]:
+        """Aggregate forecast evaluation stats for the /api/forecast/evaluation endpoint."""
+        with self._get_conn() as conn:
+            # Overall stats
+            overall = conn.execute("""
+                SELECT COUNT(*) AS total,
+                       AVG(direction_correct) AS avg_direction_acc,
+                       AVG(brier_score) AS avg_brier,
+                       AVG(log_loss) AS avg_log_loss,
+                       SUM(direction_correct) AS total_correct
+                FROM forecast_asset_outcomes
+            """).fetchone()
+
+            # Per-horizon stats
+            by_horizon = conn.execute("""
+                SELECT c.horizon,
+                       COUNT(*) AS total,
+                       AVG(o.direction_correct) AS avg_direction_acc,
+                       AVG(o.brier_score) AS avg_brier
+                FROM forecast_asset_outcomes o
+                JOIN forecast_asset_calls c ON c.id = o.call_id
+                GROUP BY c.horizon
+            """).fetchall()
+
+            # Per-asset stats
+            by_asset = conn.execute("""
+                SELECT c.ticker,
+                       COUNT(*) AS total,
+                       AVG(o.direction_correct) AS avg_direction_acc,
+                       AVG(o.brier_score) AS avg_brier,
+                       AVG(o.actual_return_pct) AS avg_actual_return
+                FROM forecast_asset_outcomes o
+                JOIN forecast_asset_calls c ON c.id = o.call_id
+                GROUP BY c.ticker
+            """).fetchall()
+
+            # Calibration bins (for calibration curve)
+            calibration = conn.execute("""
+                SELECT
+                    CASE
+                        WHEN c.confidence < 20 THEN '0-20'
+                        WHEN c.confidence < 40 THEN '20-40'
+                        WHEN c.confidence < 60 THEN '40-60'
+                        WHEN c.confidence < 80 THEN '60-80'
+                        ELSE '80-100'
+                    END AS bin,
+                    COUNT(*) AS count,
+                    AVG(o.direction_correct) AS actual_accuracy,
+                    AVG(c.confidence) AS avg_predicted_confidence
+                FROM forecast_asset_outcomes o
+                JOIN forecast_asset_calls c ON c.id = o.call_id
+                GROUP BY bin
+                ORDER BY avg_predicted_confidence ASC
+            """).fetchall()
+
+        return {
+            "overall": dict(overall) if overall else {},
+            "by_horizon": {r["horizon"]: dict(r) for r in by_horizon},
+            "by_asset": {r["ticker"]: dict(r) for r in by_asset},
+            "calibration": [dict(r) for r in calibration],
+        }

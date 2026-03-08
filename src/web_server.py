@@ -31,6 +31,9 @@ from config import load_config
 from database import Database
 from story_generator import StoryGenerator, OutlookGenerator, OutlookGrader
 from whale_intelligence import WhaleBrain
+from market_data import MarketDataProvider
+from forecast_engine import ForecastEngine
+from forecast_evaluator import ForecastEvaluator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +97,11 @@ whale_brain  = WhaleBrain(api_key=_anthropic_key, db=db)
 outlook_gen  = OutlookGenerator(api_key=_anthropic_key)
 outlook_grader = OutlookGrader(api_key=_anthropic_key)
 _claude_active = bool(_anthropic_key)
+
+# New deterministic forecast engine + evaluator
+market_data_provider = MarketDataProvider(db)
+forecast_engine = ForecastEngine(market_data_provider, db, api_key=_anthropic_key)
+forecast_evaluator = ForecastEvaluator(api_key=_anthropic_key)
 
 logger.info("Claude headlines: %s", "ENABLED (haiku)" if _claude_active else "DISABLED (add anthropic_api_key to config.json)")
 
@@ -373,11 +381,9 @@ def api_forecast():
     def _compute_and_cache():
         import concurrent.futures
         try:
-            if force:
-                outlook_gen.invalidate()
-
             def _do_compute():
-                d = outlook_gen.generate(db)
+                # Use new deterministic ForecastEngine
+                d = forecast_engine.generate(db)
                 try:
                     d["live_prices"] = outlook_grader.get_live_price_snapshot()
                 except Exception:
@@ -392,16 +398,11 @@ def api_forecast():
                 future = pool.submit(_do_compute)
                 data = future.result(timeout=90)
 
-            # Only cache successful computations — never cache fallbacks
-            if data.get("_is_fallback"):
-                logger.warning("Forecast compute returned fallback — not caching")
-            else:
-                data.pop("_is_fallback", None)  # clean up internal flag
-                db.set_state("api_outlook_cache", {
-                    "ts":   datetime.now(timezone.utc).isoformat(),
-                    "data": data,
-                })
-                logger.info("Forecast cache refreshed")
+            db.set_state("api_outlook_cache", {
+                "ts":   datetime.now(timezone.utc).isoformat(),
+                "data": data,
+            })
+            logger.info("Forecast cache refreshed (deterministic engine)")
         except concurrent.futures.TimeoutError:
             logger.error("Forecast cache refresh timed out after 90s")
             try: db.set_state("_debug_outlook_error", {"error": "Timeout after 90s", "ts": datetime.now(timezone.utc).isoformat()})
@@ -428,10 +429,9 @@ def api_forecast():
 
     # No cache (or force) — return loading skeleton, compute in background
     threading.Thread(target=_compute_and_cache, daemon=True).start()
-    fallback = outlook_gen._fallback(
-        reason="Generating forecast — this may take up to 60 seconds on first load."
+    fallback = forecast_engine.fallback(
+        reason="Generating forecast — computing signals across all assets."
     )
-    fallback.pop("_is_fallback", None)  # strip internal flag from client response
     fallback["live_prices"] = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "source": "yfinance", "assets": {},
@@ -448,6 +448,16 @@ def api_forecast_track_record():
     Triggers on-demand grading of any pending predictions.
     """
     payload = outlook_grader.get_track_record(db)
+    return jsonify(payload)
+
+
+@app.route("/api/forecast/evaluation")
+def api_forecast_evaluation():
+    """
+    Forecast evaluation endpoint — returns signal weights, driver quality,
+    calibration data, Brier scores, and baseline comparison.
+    """
+    payload = forecast_evaluator.get_evaluation(db)
     return jsonify(payload)
 
 
