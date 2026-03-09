@@ -22,6 +22,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from technical import composite_momentum
+
 logger = logging.getLogger(__name__)
 
 
@@ -198,6 +200,55 @@ class ForecastEngine:
         except Exception as e:
             logger.debug(f"ForecastEngine: weight load failed, using defaults: {e}")
 
+    def _load_calibration(self) -> Optional[list]:
+        """Load isotonic calibration curve from DB state.
+        Returns list of (raw_conf, calibrated_conf) tuples or None."""
+        try:
+            stored = self._db.get_state("forecast_calibration_curve", default=None)
+            if stored and isinstance(stored, dict):
+                curve = stored.get("curve")
+                if curve and isinstance(curve, list) and len(curve) >= 2:
+                    logger.debug(f"ForecastEngine: loaded calibration curve ({len(curve)} points)")
+                    return [(float(p[0]), float(p[1])) for p in curve]
+        except Exception as e:
+            logger.debug(f"ForecastEngine: calibration load failed: {e}")
+        return None
+
+    def _apply_calibration(self, raw_confidence: int, calibration_curve: list) -> int:
+        """
+        Apply isotonic calibration curve to raw confidence score.
+
+        Uses linear interpolation between calibration curve points.
+        The curve is a sorted list of (raw, calibrated) pairs.
+        """
+        if not calibration_curve or len(calibration_curve) < 2:
+            return raw_confidence
+
+        raw = float(raw_confidence)
+
+        # Curve is sorted by raw value
+        xs = [p[0] for p in calibration_curve]
+        ys = [p[1] for p in calibration_curve]
+
+        # Extrapolate below/above curve range
+        if raw <= xs[0]:
+            return max(15, min(95, int(round(ys[0]))))
+        if raw >= xs[-1]:
+            return max(15, min(95, int(round(ys[-1]))))
+
+        # Linear interpolation between adjacent points
+        for i in range(len(xs) - 1):
+            if xs[i] <= raw <= xs[i + 1]:
+                span = xs[i + 1] - xs[i]
+                if span < 1e-6:
+                    return max(15, min(95, int(round(ys[i]))))
+                t = (raw - xs[i]) / span
+                calibrated = ys[i] + t * (ys[i + 1] - ys[i])
+                return max(15, min(95, int(round(calibrated))))
+
+        # Fallback (shouldn't happen)
+        return raw_confidence
+
     # ── Public API ─────────────────────────────────────────────────────
 
     def generate(self, db) -> Dict[str, Any]:
@@ -207,6 +258,9 @@ class ForecastEngine:
         """
         session_id = str(uuid.uuid4())
         now = _utcnow()
+
+        # 0. Load calibration curve (may be None if not yet trained)
+        calibration_curve = self._load_calibration()
 
         # 1. Gather raw signal data
         markets = db.get_top_volume_markets(limit=25, hours=2)
@@ -228,7 +282,7 @@ class ForecastEngine:
         for asset in OUTLOOK_ASSETS:
             ticker = asset["ticker"]
             try:
-                bars = self._md.get_history(ticker, days=20)
+                bars = self._md.get_history(ticker, days=40)
                 price_histories[ticker] = bars
             except Exception:
                 price_histories[ticker] = []
@@ -291,6 +345,11 @@ class ForecastEngine:
                 # Confidence from signal agreement + modifier
                 confidence = self._compute_confidence(drivers, net_pressure)
                 confidence = max(15, min(95, confidence + self._confidence_modifier))
+
+                # Apply isotonic calibration if available
+                if calibration_curve:
+                    confidence = self._apply_calibration(confidence, calibration_curve)
+
                 confidence_lbl = _confidence_label(confidence)
 
                 # Horizon scaling: 48h gets slightly lower confidence, higher magnitude potential
@@ -494,7 +553,11 @@ class ForecastEngine:
     def _momentum_signal(
         self, ticker: str, bars: list, horizon: str
     ) -> Optional[Driver]:
-        """EWMA momentum from recent price history."""
+        """
+        Composite momentum from 5 technical indicators:
+        RSI(14), MACD(12,26,9), multi-TF momentum, Bollinger %B,
+        volume-weighted momentum.
+        """
         if len(bars) < 3:
             return Driver(
                 name=f"Momentum unavailable ({ticker})",
@@ -505,30 +568,9 @@ class ForecastEngine:
                 family="momentum",
             )
 
-        closes = [b.close for b in bars if b.close > 0]
-        if len(closes) < 3:
-            return None
+        value, source_desc = composite_momentum(bars)
 
-        # Simple returns
-        returns = [(closes[i] - closes[i-1]) / closes[i-1] * 100
-                    for i in range(1, len(closes))]
-
-        # EWMA with lambda
-        ewma = returns[0]
-        for r in returns[1:]:
-            ewma = VOL_LAMBDA * ewma + (1 - VOL_LAMBDA) * r
-
-        # 5-day simple momentum
-        lookback = min(5, len(closes) - 1)
-        mom_5d = (closes[-1] - closes[-lookback-1]) / closes[-lookback-1] * 100
-
-        # Blend EWMA and simple momentum
-        signal = 0.6 * ewma + 0.4 * mom_5d
-
-        # Normalize to [-1, 1]: +-2% daily → +-1.0
-        value = max(-1.0, min(1.0, signal / 2.0))
-
-        # 48h gets slightly amplified momentum
+        # 48h gets slightly amplified momentum — trends persist
         if horizon == "48h":
             value = max(-1.0, min(1.0, value * 1.2))
 
@@ -539,7 +581,7 @@ class ForecastEngine:
             value=round(value, 3),
             weight=weight,
             contribution=round(value * weight, 4),
-            source=f"5d move: {mom_5d:+.2f}%",
+            source=source_desc,
             family="momentum",
         )
 

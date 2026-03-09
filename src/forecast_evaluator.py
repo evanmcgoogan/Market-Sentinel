@@ -53,6 +53,74 @@ ROLLING_WINDOW = 50
 COOLDOWN_THRESHOLD = 3       # consecutive updates worse than baseline
 
 
+def _pav_isotonic(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """
+    Pool Adjacent Violators (PAV) algorithm for isotonic regression.
+
+    Takes a list of (predicted_confidence, actual_outcome) sorted by predicted
+    and returns a monotonically non-decreasing calibration curve.
+
+    This is the standard algorithm for making probability predictions honest:
+    if you say 70%, roughly 70% of those predictions should be correct.
+
+    Args:
+        points: sorted list of (predicted_prob_0to1, actual_binary_0or1)
+
+    Returns:
+        list of (predicted_prob, calibrated_prob) — monotone non-decreasing
+    """
+    if len(points) < 2:
+        return points
+
+    # Initialize blocks: each point is its own block
+    # Block = [sum_of_actuals, count, min_pred, max_pred]
+    blocks = []
+    for pred, actual in points:
+        blocks.append([float(actual), 1, pred, pred])
+
+    # Merge adjacent blocks that violate isotonicity
+    changed = True
+    while changed:
+        changed = False
+        merged = []
+        i = 0
+        while i < len(blocks):
+            if i + 1 < len(blocks):
+                mean_i = blocks[i][0] / blocks[i][1]
+                mean_j = blocks[i + 1][0] / blocks[i + 1][1]
+                if mean_i > mean_j:
+                    # Merge blocks i and i+1
+                    merged_block = [
+                        blocks[i][0] + blocks[i + 1][0],   # sum actuals
+                        blocks[i][1] + blocks[i + 1][1],   # count
+                        blocks[i][2],                        # min_pred (from left)
+                        blocks[i + 1][3],                    # max_pred (from right)
+                    ]
+                    merged.append(merged_block)
+                    i += 2
+                    changed = True
+                    continue
+            merged.append(blocks[i])
+            i += 1
+        blocks = merged
+
+    # Build output curve: one point per block at the block's midpoint prediction
+    curve = []
+    for s, n, pred_min, pred_max in blocks:
+        # Laplace smoothing: (correct + 1) / (total + 2) — prevents 0% or 100%
+        calibrated_smooth = (s + 1) / (n + 2)
+        mid_pred = (pred_min + pred_max) / 2.0
+        curve.append((mid_pred, calibrated_smooth))
+
+    # Laplace smoothing can break monotonicity for blocks of different sizes
+    # with the same raw average. Enforce monotonicity with a forward pass.
+    for i in range(1, len(curve)):
+        if curve[i][1] < curve[i - 1][1]:
+            curve[i] = (curve[i][0], curve[i - 1][1])
+
+    return curve
+
+
 class ForecastEvaluator:
     """
     Grades forecast_asset_calls against actual market prices and
@@ -398,6 +466,119 @@ class ForecastEvaluator:
             "sample_count": total_scored,
         }
 
+    # ── Isotonic Calibration ──────────────────────────────────────────
+
+    def update_calibration(self, db) -> Dict[str, Any]:
+        """
+        Compute isotonic calibration curve from graded outcomes and persist it.
+
+        The curve maps raw confidence → calibrated confidence so that if the
+        model says "70% confident", ~70% of those predictions are actually correct.
+
+        Uses Pool Adjacent Violators (PAV) algorithm with Laplace smoothing.
+        Requires at least MIN_SAMPLES_FOR_LEARNING outcomes.
+
+        Returns a report dict with curve stats.
+        """
+        outcomes = db.get_recent_forecast_outcomes(limit=ROLLING_WINDOW * 12)
+
+        if len(outcomes) < MIN_SAMPLES_FOR_LEARNING:
+            logger.info(
+                f"ForecastEvaluator: only {len(outcomes)} outcomes, "
+                f"need {MIN_SAMPLES_FOR_LEARNING} for calibration — skipping"
+            )
+            return {"status": "insufficient_data", "count": len(outcomes)}
+
+        # Build (predicted_prob, actual_binary) points sorted by predicted_prob
+        points = []
+        for o in outcomes:
+            confidence = o.get("confidence")
+            dir_correct = o.get("direction_correct")
+            if confidence is None or dir_correct is None:
+                continue
+            pred_prob = float(confidence) / 100.0
+            actual = float(dir_correct)
+            points.append((pred_prob, actual))
+
+        if len(points) < MIN_SAMPLES_FOR_LEARNING:
+            return {"status": "insufficient_data", "count": len(points)}
+
+        # Sort by predicted probability
+        points.sort(key=lambda p: p[0])
+
+        # Run PAV algorithm
+        raw_curve = _pav_isotonic(points)
+
+        if len(raw_curve) < 2:
+            return {"status": "degenerate_curve", "count": len(points)}
+
+        # Convert to confidence scale (0-100) for storage
+        curve_100 = [(round(p * 100, 2), round(c * 100, 2)) for p, c in raw_curve]
+
+        # Compute calibration stats
+        # Expected Calibration Error (ECE): bin predictions and measure gap
+        n_bins = 10
+        bin_correct = [0] * n_bins
+        bin_total = [0] * n_bins
+        bin_conf_sum = [0.0] * n_bins
+        for pred, actual in points:
+            b = min(int(pred * n_bins), n_bins - 1)
+            bin_total[b] += 1
+            bin_correct[b] += actual
+            bin_conf_sum[b] += pred
+
+        ece = 0.0
+        bins_detail = []
+        for b in range(n_bins):
+            if bin_total[b] > 0:
+                acc = bin_correct[b] / bin_total[b]
+                avg_conf = bin_conf_sum[b] / bin_total[b]
+                gap = abs(acc - avg_conf)
+                ece += gap * (bin_total[b] / len(points))
+                bins_detail.append({
+                    "bin": f"{b * 10}-{(b + 1) * 10}%",
+                    "count": bin_total[b],
+                    "accuracy": round(acc, 4),
+                    "avg_confidence": round(avg_conf, 4),
+                    "gap": round(gap, 4),
+                })
+
+        # Persist calibration curve
+        state = {
+            "curve": curve_100,
+            "ece": round(ece, 4),
+            "sample_count": len(points),
+            "n_blocks": len(raw_curve),
+            "updated_at": _utcnow().isoformat(),
+            "bins": bins_detail,
+        }
+        db.set_state("forecast_calibration_curve", state)
+
+        logger.info(
+            f"ForecastEvaluator: calibration updated — "
+            f"{len(points)} samples, {len(raw_curve)} isotonic blocks, ECE={ece:.4f}"
+        )
+
+        return {
+            "status": "updated",
+            "sample_count": len(points),
+            "n_blocks": len(raw_curve),
+            "ece": round(ece, 4),
+            "curve": curve_100,
+            "bins": bins_detail,
+        }
+
+    @staticmethod
+    def get_calibration_curve(db) -> Optional[Dict]:
+        """Load the current calibration curve from DB for display/API."""
+        try:
+            stored = db.get_state("forecast_calibration_curve", default=None)
+            if stored and isinstance(stored, dict):
+                return stored
+        except Exception:
+            pass
+        return None
+
     # ── Evaluation Payload ─────────────────────────────────────────────
 
     def get_evaluation(self, db) -> Dict[str, Any]:
@@ -421,6 +602,9 @@ class ForecastEvaluator:
             vs_baseline = stored.get("vs_baseline", {})
             confidence_modifier = int(stored.get("confidence_modifier", 0))
 
+        # Include calibration data
+        calibration = self.get_calibration_curve(db)
+
         return {
             "stats": eval_stats,
             "current_weights": current_weights,
@@ -428,6 +612,7 @@ class ForecastEvaluator:
             "driver_quality": driver_quality,
             "vs_baseline": vs_baseline,
             "confidence_modifier": confidence_modifier,
+            "calibration": calibration,
             "server_time": _utcnow().isoformat(),
         }
 

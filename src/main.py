@@ -536,7 +536,7 @@ class MarketSentinel:
             logger.error(f"Forecast evaluation failed: {e}")
 
     def _maybe_update_weights(self):
-        """Update signal weights every WEIGHT_UPDATE_INTERVAL."""
+        """Update signal weights + calibration curve every WEIGHT_UPDATE_INTERVAL."""
         now = utcnow()
         if (now - self._last_weight_update) < WEIGHT_UPDATE_INTERVAL:
             return
@@ -549,6 +549,15 @@ class MarketSentinel:
             self._forecast_engine._load_weights()
         except Exception as e:
             logger.error(f"Weight update failed: {e}")
+
+        # Update isotonic calibration curve
+        try:
+            cal_report = self._forecast_evaluator.update_calibration(self.db)
+            cal_status = cal_report.get("status", "?")
+            ece = cal_report.get("ece", "n/a")
+            logger.info(f"Calibration update: status={cal_status}, ECE={ece}")
+        except Exception as e:
+            logger.error(f"Calibration update failed: {e}")
 
     async def _run_cycle(self):
         """Run one monitoring cycle."""
