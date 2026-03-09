@@ -457,6 +457,12 @@ class ForecastEvaluator:
             f"dir_acc={model_dir_acc:.3f}, conf_mod={confidence_modifier}"
         )
 
+        # Update per-asset weights (uses same learning algorithm)
+        try:
+            self._update_per_asset_weights(db, outcomes)
+        except Exception as e:
+            logger.warning(f"ForecastEvaluator: per-asset weight update failed: {e}")
+
         return {
             "status": "updated",
             "weights": new_weights,
@@ -465,6 +471,195 @@ class ForecastEvaluator:
             "confidence_modifier": confidence_modifier,
             "sample_count": total_scored,
         }
+
+    # ── Per-Asset Weight Specialization ──────────────────────────────
+
+    def _learn_weights_from_outcomes(
+        self, outcomes: list, current_weights: Dict[str, float]
+    ) -> Dict[str, float]:
+        """
+        Core weight learning algorithm — driver attribution + nudge.
+
+        Reusable for both global and per-asset/per-category weight learning.
+        Same LR, shrinkage, and bounds as the global update_weights() logic.
+
+        Args:
+            outcomes: list of outcome dicts (with drivers_json, direction_correct)
+            current_weights: starting weight vector
+
+        Returns:
+            New weight vector (normalized to sum=1)
+        """
+        family_stats: Dict[str, Dict[str, float]] = {}
+        for fam in DEFAULT_WEIGHTS:
+            family_stats[fam] = {
+                "correct_contrib": 0, "incorrect_contrib": 0,
+                "correct_count": 0, "incorrect_count": 0,
+            }
+
+        for o in outcomes:
+            dir_correct = o.get("direction_correct", 0)
+            try:
+                drivers = json.loads(o.get("drivers_json") or "[]")
+            except Exception:
+                drivers = []
+
+            for d in drivers:
+                fam = d.get("family", "")
+                if fam not in family_stats:
+                    continue
+                contrib = abs(d.get("contribution", 0))
+                if dir_correct:
+                    family_stats[fam]["correct_contrib"] += contrib
+                    family_stats[fam]["correct_count"] += 1
+                else:
+                    family_stats[fam]["incorrect_contrib"] += contrib
+                    family_stats[fam]["incorrect_count"] += 1
+
+        # Compute per-family quality score
+        driver_quality: Dict[str, float] = {}
+        for fam, stats in family_stats.items():
+            total_fam = stats["correct_count"] + stats["incorrect_count"]
+            if total_fam < 5:
+                driver_quality[fam] = 0.5  # neutral — insufficient data
+            else:
+                correct_rate = stats["correct_count"] / total_fam
+                avg_contrib = (
+                    stats["correct_contrib"] + stats["incorrect_contrib"]
+                ) / total_fam
+                driver_quality[fam] = round(
+                    correct_rate * (1 + avg_contrib), 4
+                )
+
+        # Apply learning
+        new_weights: Dict[str, float] = {}
+        for fam in DEFAULT_WEIGHTS:
+            quality = driver_quality.get(fam, 0.5)
+            old = current_weights.get(fam, DEFAULT_WEIGHTS[fam])
+
+            learned = old + LEARNING_RATE * (quality - old)
+            adjusted = (
+                SHRINKAGE_FACTOR * learned
+                + (1 - SHRINKAGE_FACTOR) * DEFAULT_WEIGHTS[fam]
+            )
+            adjusted = max(WEIGHT_FLOOR, min(WEIGHT_CEILING, adjusted))
+            new_weights[fam] = round(adjusted, 4)
+
+        # Normalize to sum = 1
+        total_w = sum(new_weights.values())
+        if total_w > 0:
+            new_weights = {
+                k: round(v / total_w, 4) for k, v in new_weights.items()
+            }
+
+        return new_weights
+
+    def _update_per_asset_weights(self, db, outcomes: list):
+        """
+        Learn per-asset and per-category weight vectors from outcomes.
+
+        Groups outcomes by ticker and category, runs the learning algorithm
+        on each group with sufficient samples, and persists to DB state.
+        Three-tier hierarchy: per-asset (>=15) -> per-category (>=10) -> global.
+        """
+        from forecast_engine import (
+            ASSET_CATEGORY, PER_ASSET_MIN_SAMPLES, PER_CATEGORY_MIN_SAMPLES,
+        )
+
+        # Group by ticker and by category
+        by_ticker: Dict[str, list] = {}
+        by_category: Dict[str, list] = {}
+        for o in outcomes:
+            ticker = o.get("ticker", "")
+            if not ticker:
+                continue
+            by_ticker.setdefault(ticker, []).append(o)
+            cat = ASSET_CATEGORY.get(ticker, "")
+            if cat:
+                by_category.setdefault(cat, []).append(o)
+
+        # Load existing per-asset weights state
+        stored = db.get_state("forecast_per_asset_weights", default=None)
+        if not stored or not isinstance(stored, dict):
+            stored = {
+                "per_asset": {},
+                "per_category": {},
+                "thresholds": {
+                    "per_asset_min_samples": PER_ASSET_MIN_SAMPLES,
+                    "per_category_min_samples": PER_CATEGORY_MIN_SAMPLES,
+                },
+            }
+
+        # Load current global weights as base for learning
+        global_stored = db.get_state("forecast_signal_weights", default=None)
+        global_weights = dict(DEFAULT_WEIGHTS)
+        if global_stored and isinstance(global_stored, dict):
+            w = global_stored.get("weights", {})
+            for k in global_weights:
+                if k in w:
+                    global_weights[k] = float(w[k])
+
+        now_str = _utcnow().isoformat()
+
+        # Per-asset learning
+        per_asset_data = dict(stored.get("per_asset", {}))
+        for ticker, ticker_outcomes in by_ticker.items():
+            if len(ticker_outcomes) < PER_ASSET_MIN_SAMPLES:
+                continue
+            # Use existing per-asset weights as starting point, or global
+            existing = per_asset_data.get(ticker, {})
+            base_weights = existing.get("weights", global_weights)
+            base_weights = {
+                k: float(base_weights.get(k, global_weights.get(k, v)))
+                for k, v in DEFAULT_WEIGHTS.items()
+            }
+            new_weights = self._learn_weights_from_outcomes(
+                ticker_outcomes, base_weights
+            )
+            per_asset_data[ticker] = {
+                "weights": new_weights,
+                "sample_count": len(ticker_outcomes),
+                "updated_at": now_str,
+            }
+
+        # Per-category learning
+        per_category_data = dict(stored.get("per_category", {}))
+        for cat, cat_outcomes in by_category.items():
+            if len(cat_outcomes) < PER_CATEGORY_MIN_SAMPLES:
+                continue
+            existing = per_category_data.get(cat, {})
+            base_weights = existing.get("weights", global_weights)
+            base_weights = {
+                k: float(base_weights.get(k, global_weights.get(k, v)))
+                for k, v in DEFAULT_WEIGHTS.items()
+            }
+            new_weights = self._learn_weights_from_outcomes(
+                cat_outcomes, base_weights
+            )
+            per_category_data[cat] = {
+                "weights": new_weights,
+                "sample_count": len(cat_outcomes),
+                "updated_at": now_str,
+            }
+
+        # Persist
+        state = {
+            "per_asset": per_asset_data,
+            "per_category": per_category_data,
+            "thresholds": {
+                "per_asset_min_samples": PER_ASSET_MIN_SAMPLES,
+                "per_category_min_samples": PER_CATEGORY_MIN_SAMPLES,
+            },
+            "updated_at": now_str,
+        }
+        db.set_state("forecast_per_asset_weights", state)
+
+        n_asset = sum(1 for v in per_asset_data.values() if "weights" in v)
+        n_cat = sum(1 for v in per_category_data.values() if "weights" in v)
+        logger.info(
+            f"ForecastEvaluator: per-asset weights updated — "
+            f"{n_asset} assets, {n_cat} categories"
+        )
 
     # ── Isotonic Calibration ──────────────────────────────────────────
 
@@ -605,6 +800,15 @@ class ForecastEvaluator:
         # Include calibration data
         calibration = self.get_calibration_curve(db)
 
+        # Include per-asset weight vectors
+        per_asset_weights = None
+        try:
+            pa_stored = db.get_state("forecast_per_asset_weights", default=None)
+            if pa_stored and isinstance(pa_stored, dict):
+                per_asset_weights = pa_stored
+        except Exception:
+            pass
+
         return {
             "stats": eval_stats,
             "current_weights": current_weights,
@@ -613,6 +817,7 @@ class ForecastEvaluator:
             "vs_baseline": vs_baseline,
             "confidence_modifier": confidence_modifier,
             "calibration": calibration,
+            "per_asset_weights": per_asset_weights,
             "server_time": _utcnow().isoformat(),
         }
 

@@ -90,6 +90,16 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
 
 VOL_LAMBDA = 0.94  # RiskMetrics EWMA decay
 
+# Per-asset weight specialization thresholds
+PER_ASSET_MIN_SAMPLES = 15
+PER_CATEGORY_MIN_SAMPLES = 10
+ASSET_CATEGORY: Dict[str, str] = {a["ticker"]: a["category"] for a in OUTLOOK_ASSETS}
+
+# Prediction market signal tuning constants
+_PM_HALF_LIFE_HOURS = 4.0         # market signal halves every 4 hours
+_PM_ALERT_HALF_LIFE_HOURS = 2.0   # alerts decay faster — recency matters more
+_PM_MIN_VOLUME_FOR_WEIGHT = 10_000  # $10K floor to avoid noise from tiny markets
+
 # Asset-level keyword mappings — which prediction market topics map to each asset
 ASSET_KEYWORDS: Dict[str, List[str]] = {
     "SPY":  ["s&p", "stock market", "recession", "fed", "interest rate", "gdp", "economy", "tariff", "trade war", "inflation"],
@@ -186,7 +196,7 @@ class ForecastEngine:
         self._load_weights()
 
     def _load_weights(self):
-        """Load learned signal weights from DB state."""
+        """Load learned signal weights from DB state (global + per-asset)."""
         try:
             stored = self._db.get_state("forecast_signal_weights", default=None)
             if stored and isinstance(stored, dict):
@@ -199,6 +209,28 @@ class ForecastEngine:
                 self._confidence_modifier = int(stored.get("confidence_modifier", 0))
         except Exception as e:
             logger.debug(f"ForecastEngine: weight load failed, using defaults: {e}")
+
+        # Load per-asset and per-category weight vectors
+        self._per_asset_weights: Dict[str, Dict[str, float]] = {}
+        self._per_category_weights: Dict[str, Dict[str, float]] = {}
+        try:
+            pa_stored = self._db.get_state("forecast_per_asset_weights", default=None)
+            if pa_stored and isinstance(pa_stored, dict):
+                for ticker, data in pa_stored.get("per_asset", {}).items():
+                    if isinstance(data, dict) and "weights" in data:
+                        self._per_asset_weights[ticker] = data["weights"]
+                for cat, data in pa_stored.get("per_category", {}).items():
+                    if isinstance(data, dict) and "weights" in data:
+                        self._per_category_weights[cat] = data["weights"]
+                n_a = len(self._per_asset_weights)
+                n_c = len(self._per_category_weights)
+                if n_a or n_c:
+                    logger.info(
+                        f"ForecastEngine: loaded {n_a} per-asset, "
+                        f"{n_c} per-category weight vectors"
+                    )
+        except Exception as e:
+            logger.debug(f"ForecastEngine: per-asset weight load failed: {e}")
 
     def _load_calibration(self) -> Optional[list]:
         """Load isotonic calibration curve from DB state.
@@ -292,25 +324,32 @@ class ForecastEngine:
         all_calls: List[Dict] = []  # for persisting to forecast_asset_calls
 
         # First pass: compute non-cross-asset signals
+        # Per-asset weight specialization: swap weight vector per asset
         raw_signals: Dict[str, Dict[str, List[Driver]]] = {}  # ticker -> horizon -> drivers
         for asset in OUTLOOK_ASSETS:
             ticker = asset["ticker"]
             raw_signals[ticker] = {}
-            for horizon in ("24h", "48h"):
-                drivers = []
-                # Signal 1: Prediction market pressure
-                d = self._prediction_market_signal(ticker, markets, alerts)
-                if d: drivers.append(d)
-                # Signal 2: Whale flow
-                d = self._whale_signal(ticker, whale_data)
-                if d: drivers.append(d)
-                # Signal 3: Momentum
-                d = self._momentum_signal(ticker, price_histories.get(ticker, []), horizon)
-                if d: drivers.append(d)
-                # Signal 5: News sentiment
-                d = self._news_signal(ticker, news)
-                if d: drivers.append(d)
-                raw_signals[ticker][horizon] = drivers
+            asset_weights = self._get_weights_for_asset(ticker)
+            saved_weights = self._weights
+            self._weights = asset_weights
+            try:
+                for horizon in ("24h", "48h"):
+                    drivers = []
+                    # Signal 1: Prediction market pressure
+                    d = self._prediction_market_signal(ticker, markets, alerts)
+                    if d: drivers.append(d)
+                    # Signal 2: Whale flow
+                    d = self._whale_signal(ticker, whale_data)
+                    if d: drivers.append(d)
+                    # Signal 3: Momentum
+                    d = self._momentum_signal(ticker, price_histories.get(ticker, []), horizon)
+                    if d: drivers.append(d)
+                    # Signal 5: News sentiment
+                    d = self._news_signal(ticker, news)
+                    if d: drivers.append(d)
+                    raw_signals[ticker][horizon] = drivers
+            finally:
+                self._weights = saved_weights
 
         # Compute risk-on/risk-off aggregate from SPY + BTC + VIX momentum
         risk_score = self._compute_risk_score(raw_signals)
@@ -321,7 +360,12 @@ class ForecastEngine:
             meta = asset
             horizons_dict: Dict[str, Any] = {}
 
-            for horizon in ("24h", "48h"):
+            # Per-asset weight specialization for cross-asset signal
+            asset_weights = self._get_weights_for_asset(ticker)
+            saved_weights = self._weights
+            self._weights = asset_weights
+            try:
+              for horizon in ("24h", "48h"):
                 drivers = list(raw_signals[ticker][horizon])
 
                 # Signal 4: Cross-asset risk propagation
@@ -405,6 +449,8 @@ class ForecastEngine:
                     "p_flat": round(p_flat, 3),
                     "drivers": driver_dicts,
                 })
+            finally:
+              self._weights = saved_weights
 
             horizons_dict["ticker"] = ticker
             horizons_dict["name"] = meta.get("name", ticker)
@@ -458,28 +504,69 @@ class ForecastEngine:
     def _prediction_market_signal(
         self, ticker: str, markets: list, alerts: list
     ) -> Optional[Driver]:
-        """Scan prediction markets for signals relevant to this asset."""
+        """
+        Scan prediction markets for signals relevant to this asset.
+
+        Weights each market by:
+          - sqrt(volume_24h / floor)  — bigger markets carry more information
+          - exp(-age / half_life)     — recent data dominates stale data
+          - keyword relevance         — how many keywords match
+
+        Weights each alert by:
+          - min(|delta|/5, 2.0)       — larger moves carry more signal
+          - exp(-age / half_life)     — 2h half-life (faster decay than markets)
+          - keyword relevance
+        """
         keywords = ASSET_KEYWORDS.get(ticker, [])
         if not keywords:
             return None
 
-        bullish_hits = 0
-        bearish_hits = 0
-        total_relevance = 0
+        now = _utcnow()
+        weighted_bullish = 0.0
+        weighted_bearish = 0.0
+        total_weight = 0.0
+        top_market_name = ""
+        top_market_weight = 0.0
+        top_market_volume = 0.0
+        top_market_delta = 0.0
 
+        # --- Market signals (probability levels) ---
         for m in markets:
             name = (m.get("market_name") or "").lower()
             prob = m.get("latest_prob") or 50
             relevance = sum(1 for kw in keywords if kw.lower() in name)
             if relevance == 0:
                 continue
-            total_relevance += relevance
-            # High-prob bullish-sounding markets push UP, low-prob push DOWN
-            if prob > 60:
-                bullish_hits += relevance * (prob - 50) / 50
-            elif prob < 40:
-                bearish_hits += relevance * (50 - prob) / 50
 
+            # Volume weight: sqrt(vol / floor); default 1.0 if missing
+            vol = m.get("volume_24h") or 0
+            if vol > 0:
+                vol_weight = math.sqrt(max(vol, _PM_MIN_VOLUME_FOR_WEIGHT) / _PM_MIN_VOLUME_FOR_WEIGHT)
+            else:
+                vol_weight = 1.0
+
+            # Time decay: exp(-0.693 * age_hours / half_life)
+            age_hours = self._hours_since(m.get("latest_ts"), now)
+            time_weight = math.exp(-0.693 * age_hours / _PM_HALF_LIFE_HOURS)
+
+            composite_weight = relevance * vol_weight * time_weight
+
+            # High-prob bullish-sounding markets push UP, low-prob push DOWN
+            if prob > 55:
+                weighted_bullish += composite_weight * (prob - 50) / 50
+            elif prob < 45:
+                weighted_bearish += composite_weight * (50 - prob) / 50
+            total_weight += composite_weight
+
+            # Track top contributing market for source description
+            if composite_weight > top_market_weight:
+                top_market_weight = composite_weight
+                top_market_name = m.get("market_name") or ""
+                top_market_volume = vol
+                top_market_delta = prob - 50
+
+        # --- Alert signals (probability changes) ---
+        top_alert_delta = 0.0
         for a in alerts:
             name = (a.get("market_name") or "").lower()
             new_p = a.get("new_probability") or 50
@@ -487,27 +574,47 @@ class ForecastEngine:
             relevance = sum(1 for kw in keywords if kw.lower() in name)
             if relevance == 0:
                 continue
-            total_relevance += relevance
-            delta = new_p - old_p
-            if delta > 0:
-                bullish_hits += relevance * min(abs(delta) / 10, 1.0)
-            else:
-                bearish_hits += relevance * min(abs(delta) / 10, 1.0)
 
-        if total_relevance == 0:
+            delta = new_p - old_p
+            if abs(delta) < 0.5:
+                continue  # noise filter
+
+            # Magnitude weight: larger moves carry more signal
+            mag_weight = min(abs(delta) / 5.0, 2.0)
+
+            # Time decay (faster for alerts — recency matters more)
+            age_hours = self._hours_since(a.get("timestamp"), now)
+            time_weight = math.exp(-0.693 * age_hours / _PM_ALERT_HALF_LIFE_HOURS)
+
+            composite_weight = relevance * mag_weight * time_weight
+
+            if delta > 0:
+                weighted_bullish += composite_weight
+            else:
+                weighted_bearish += composite_weight
+            total_weight += composite_weight
+
+            if abs(delta) > abs(top_alert_delta):
+                top_alert_delta = delta
+
+        if total_weight < 0.01:
             return None
 
         # Normalize to [-1, 1]
-        raw = (bullish_hits - bearish_hits) / max(total_relevance, 1)
+        raw = (weighted_bullish - weighted_bearish) / total_weight
         value = max(-1.0, min(1.0, raw))
         weight = self._weights.get("prediction_market", 0.30)
+
+        source = self._pm_source_description(
+            top_market_name, top_market_volume, top_alert_delta, total_weight
+        )
 
         return Driver(
             name=f"Prediction market {'bullish' if value > 0 else 'bearish'} on {ticker}",
             value=round(value, 3),
             weight=weight,
             contribution=round(value * weight, 4),
-            source=f"{total_relevance} relevant markets",
+            source=source,
             family="prediction_market",
         )
 
@@ -645,6 +752,63 @@ class ForecastEngine:
             source=f"{relevant_count} relevant articles",
             family="news_sentiment",
         )
+
+    # ── Prediction Market Helpers ──────────────────────────────────────
+
+    @staticmethod
+    def _hours_since(timestamp_str: Optional[str], now: datetime) -> float:
+        """Parse ISO timestamp, return hours elapsed. Defaults to 24h on failure."""
+        if not timestamp_str:
+            return 24.0
+        try:
+            ts = timestamp_str
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            dt = dt.replace(tzinfo=None)  # match naive UTC
+            delta = (now - dt).total_seconds() / 3600.0
+            return max(0.0, delta)
+        except Exception:
+            return 24.0
+
+    @staticmethod
+    def _pm_source_description(
+        top_market: str, volume: float, alert_delta: float, total_weight: float
+    ) -> str:
+        """Build rich source string for prediction market driver."""
+        parts = []
+        if top_market:
+            name_short = top_market[:60] + ("…" if len(top_market) > 60 else "")
+            parts.append(name_short)
+        if volume > 0:
+            if volume >= 1_000_000:
+                parts.append(f"${volume / 1_000_000:.1f}M vol")
+            elif volume >= 1_000:
+                parts.append(f"${volume / 1_000:.0f}K vol")
+        if abs(alert_delta) >= 1:
+            direction = "up" if alert_delta > 0 else "down"
+            parts.append(f"{abs(alert_delta):.0f}pp {direction}")
+        parts.append(f"wt={total_weight:.1f}")
+        return " | ".join(parts) if parts else "prediction markets"
+
+    # ── Per-Asset Weight Resolution ────────────────────────────────────
+
+    def _get_weights_for_asset(self, ticker: str) -> Dict[str, float]:
+        """
+        Resolve weight vector for a specific asset.
+        Three-tier fallback: per-asset → per-category → global.
+        """
+        # Tier 1: per-asset weights
+        if ticker in self._per_asset_weights:
+            return self._per_asset_weights[ticker]
+
+        # Tier 2: per-category weights
+        category = ASSET_CATEGORY.get(ticker)
+        if category and category in self._per_category_weights:
+            return self._per_category_weights[category]
+
+        # Tier 3: global weights
+        return self._weights
 
     # ── Helpers ────────────────────────────────────────────────────────
 
