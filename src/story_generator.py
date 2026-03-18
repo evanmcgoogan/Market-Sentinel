@@ -13,6 +13,7 @@ Two layers on top of raw data:
 """
 
 import json
+import math
 import os
 import re
 import hashlib
@@ -366,6 +367,8 @@ class Story:
     watch_assets: List[str]
     volume_24h: Optional[float]
     is_radar: bool = False
+    end_date: Optional[str] = None
+    intelligence_value: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -390,6 +393,8 @@ class Story:
             "watch_assets":    self.watch_assets,
             "volume_24h":      self.volume_24h,
             "is_radar":        self.is_radar,
+            "end_date":        self.end_date,
+            "intelligence_value": round(self.intelligence_value, 1),
             "is_cluster":      False,
         }
 
@@ -892,12 +897,36 @@ class StoryGenerator:
             if s.probability >= 97.0 or s.probability <= 3.0:
                 s.signal_score = s.signal_score * 0.25  # 75% penalty
 
-        # Deduplicate by market_name — keep highest-scored story per market
+        # ── Pass 1 dedup: exact market_name — keep highest-scored per market
         seen: Dict[str, Story] = {}
         for s in raw:
             if s.market_name not in seen or s.signal_score > seen[s.market_name].signal_score:
                 seen[s.market_name] = s
         raw = list(seen.values())
+
+        # ── Pass 2 dedup: question-stem — collapses time-variant duplicates
+        #    "Bitcoin ≥$83k on March 17?" and "Bitcoin ≥$84k on March 18?"
+        #    map to the same stem → only highest-intelligence-value survives.
+        stem_best: Dict[str, Story] = {}
+        for s in raw:
+            stem = _question_stem(s.market_name)
+            if stem not in stem_best or s.intelligence_value > stem_best[stem].intelligence_value:
+                stem_best[stem] = s
+        raw = list(stem_best.values())
+
+        # ── Per-category rate limit: max 3 stories per category
+        #    Prevents any single topic from dominating the feed.
+        #    Sort by intelligence_value first so we keep the best ones.
+        raw.sort(key=lambda s: s.intelligence_value, reverse=True)
+        cat_counts: Dict[str, int] = {}
+        rate_limited: List[Story] = []
+        max_per_category = 3
+        for s in raw:
+            count = cat_counts.get(s.category, 0)
+            if count < max_per_category:
+                rate_limited.append(s)
+                cat_counts[s.category] = count + 1
+        raw = rate_limited
 
         clustered = self._cluster(raw)
         if self._claude:
@@ -935,7 +964,16 @@ class StoryGenerator:
             or (s.category == "OTHER" and (s.volume_24h or 0) >= 500_000)
         ]
 
-        stories.sort(key=lambda s: s.volume_24h or 0.0, reverse=True)
+        # ── Stem dedup: collapse time-variant duplicates in radar too
+        stem_best: Dict[str, Story] = {}
+        for s in stories:
+            stem = _question_stem(s.market_name)
+            if stem not in stem_best or s.intelligence_value > stem_best[stem].intelligence_value:
+                stem_best[stem] = s
+        stories = list(stem_best.values())
+
+        # ── Sort by intelligence value, not raw volume
+        stories.sort(key=lambda s: s.intelligence_value, reverse=True)
         return stories[:limit]
 
     def generate_resolved_context(self, db, limit: int = 6) -> List[Dict]:
@@ -1139,6 +1177,10 @@ class StoryGenerator:
             headline = _make_headline(name, new_prob, change, direction, reasons)
             lede     = _make_lede(name, row["platform"], old_prob, new_prob, change, reasons, score)
 
+            vol      = row.get("snapshot_volume_24h") or row.get("volume_24h")
+            end_dt   = row.get("snapshot_end_date") or row.get("end_date")
+            iv       = _intelligence_value(category, vol, score, end_dt)
+
             return Story(
                 story_id=f"alert-{row['id']}",
                 market_id=row.get("market_id", ""),
@@ -1157,8 +1199,10 @@ class StoryGenerator:
                 timestamp=ts,
                 urgency=_urgency(score, ts),
                 watch_assets=_watch_assets(name),
-                volume_24h=None,
+                volume_24h=vol,
                 is_radar=False,
+                end_date=end_dt,
+                intelligence_value=iv,
             )
         except Exception as e:
             logger.debug(f"Row parse error: {e}")
@@ -1180,6 +1224,10 @@ class StoryGenerator:
             # Build radar headline — full clean title, probability at end
             q_bare  = re.sub(r'\?$', '', _short_name(name)).strip()
             headline = f"{q_bare} — Odds {direction_w} {abs(change):.1f}pp to {latest:.0f}%"
+
+            vol    = row.get("volume_24h")
+            end_dt = row.get("end_date")
+            iv     = _intelligence_value(category, vol, score, end_dt)
 
             return Story(
                 story_id=f"radar-{row['platform']}-{row['market_id']}",
@@ -1204,8 +1252,10 @@ class StoryGenerator:
                 timestamp=ts,
                 urgency="watch",
                 watch_assets=_watch_assets(name),
-                volume_24h=row.get("volume_24h"),
+                volume_24h=vol,
                 is_radar=True,
+                end_date=end_dt,
+                intelligence_value=iv,
             )
         except Exception as e:
             logger.debug(f"Mover parse error: {e}")
@@ -1264,6 +1314,87 @@ def _question_stem(name: str) -> str:
     # Remove stop words for a cleaner stem
     words = [w for w in s.split() if w not in STOP_WORDS and len(w) > 1]
     return ' '.join(words)
+
+
+# ---------------------------------------------------------------------------
+# Intelligence value scoring
+# ---------------------------------------------------------------------------
+
+_CATEGORY_PREMIUM = {
+    "GEOPOLITICS": 2.0,  "CONFLICT": 2.0,
+    "POLITICS": 1.5,     "MARKETS": 1.5,
+    "TECHNOLOGY": 1.3,   "OTHER": 0.5,
+    "SPORTS": 0.0,
+}
+
+_MIN_VOLUME_FOR_BOOST = 100_000      # $100k — below this, penalize
+_MAX_VOLUME_FOR_BOOST = 50_000_000   # $50M — ceiling for log scaling
+
+
+def _intelligence_value(
+    category: str,
+    volume_24h: Optional[float],
+    signal_score: float,
+    end_date: Optional[str] = None,
+) -> float:
+    """
+    Rank markets by intelligence value — what matters for updating
+    a mental model of the world in 10 seconds.
+
+    Score = category_premium × volume_factor × horizon_factor × signal_score
+    """
+    cat_mult = _CATEGORY_PREMIUM.get(category, 0.5)
+
+    # Volume factor: log-scaled, 1.0 at $100k, ~2.7 at $50M
+    vol = volume_24h or 0.0
+    if vol < _MIN_VOLUME_FOR_BOOST:
+        vol_factor = 0.5  # low-volume markets are penalized
+    else:
+        vol_factor = 1.0 + math.log10(vol / _MIN_VOLUME_FOR_BOOST)
+
+    # Horizon factor: markets resolving in >7 days = strategic signal,
+    # markets resolving in <4 hours = noise (already caught by filters)
+    horizon_factor = 1.0
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            hours_to_resolve = (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+            if hours_to_resolve < 4:
+                horizon_factor = 0.3   # imminent resolution = low signal
+            elif hours_to_resolve < 24:
+                horizon_factor = 0.7
+            elif hours_to_resolve > 168:  # >1 week
+                horizon_factor = 1.5   # strategic
+        except (ValueError, TypeError):
+            pass
+
+    return cat_mult * vol_factor * horizon_factor * signal_score
+
+
+# ---------------------------------------------------------------------------
+# Question-stem deduplication
+# ---------------------------------------------------------------------------
+
+_STEM_STRIP_RE = re.compile(
+    r'\$[\d,.]+[kKmMbB]?'                          # dollar amounts
+    r'|\d+:\d+\s*(?:am|pm)?\s*(?:est|pst|utc|cst|mst|et|pt|ct|mt|gmt)?'  # times + tz (before day nums!)
+    r'|[\d]{1,2}(?:st|nd|rd|th)?'                   # day numbers
+    r'|\b\d{4}\b'                                    # years
+    r'|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*'  # months
+    r'|\d+\.?\d*%?'                                  # bare numbers / percentages
+    , re.IGNORECASE,
+)
+
+
+def _question_stem(name: str) -> str:
+    """
+    Strip numbers, dollar amounts, dates, and times to produce a
+    canonical stem.  Two markets that differ only in threshold / date
+    will collapse to the same stem.
+
+    Example: "Bitcoin ≥$83k on March 17?" → "bitcoin ≥ on  ?"
+    """
+    return _STEM_STRIP_RE.sub('', name.lower()).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1340,6 +1471,40 @@ _ESPORTS_PATTERNS = [
     "esport", "e-sport",
 ]
 
+# Hourly/daily binary crypto options — time-variant threshold markets.
+# These are "$83k on March 18" style markets that evade the simpler
+# "bitcoin above" patterns because they use ≥/≤ or specific timestamps.
+_HOURLY_BINARY_PATTERNS = [
+    "bitcoin ≥", "bitcoin ≤", "btc ≥", "btc ≤",
+    "ethereum ≥", "ethereum ≤", "eth ≥", "eth ≤",
+    "solana ≥", "solana ≤", "sol ≥", "sol ≤",
+    "bitcoin price at", "btc price at", "eth price at",
+    "bitcoin on march", "bitcoin on april", "bitcoin on may",
+    "bitcoin on june", "bitcoin on july", "bitcoin on august",
+    "btc on march", "btc on april", "btc on may",
+    "crypto price at", "price at 5pm", "price at 12pm",
+    "price at 5:00", "price at 12:00",
+    "bitcoin be worth", "btc be worth", "eth be worth",
+]
+
+# Regex for time-resolution markets: crypto + dollar amount + date
+_TIME_RESOLUTION_RE = re.compile(
+    r'(?:bitcoin|btc|eth|ethereum|sol|solana).*'
+    r'\$[\d,.]+[kKmMbB]?\s*'
+    r'(?:on|by|before|after)\s+'
+    r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
+    re.IGNORECASE,
+)
+
+# Handicap / spread markets — sports betting dressed as prediction markets
+_HANDICAP_SPREAD_PATTERNS = [
+    "handicap", "spread", "over/under", "over under",
+    "total points", "total goals", "total runs",
+    "first half", "second half", "1st half", "2nd half",
+    "moneyline", "money line", "point spread",
+    "parlays", "teaser", "prop bet",
+]
+
 # Parlay/combo market detection: Kalshi combo markets have names like
 # "yes Georgia Tech,yes SMU,yes Milwaukee" — these are sports parlays
 # dressed up as prediction markets. Detect them by structure.
@@ -1406,6 +1571,18 @@ def _is_noise_market(name: str) -> bool:
 
     # ── Pass 4: crypto price noise ────────────────────────────────────
     if any(pat in nl for pat in _CRYPTO_NOISE_PATTERNS):
+        return True
+
+    # ── Pass 4b: hourly binary crypto options ──────────────────────────
+    if any(pat in nl for pat in _HOURLY_BINARY_PATTERNS):
+        return True
+
+    # ── Pass 4c: regex for time-variant crypto threshold markets ───────
+    if _TIME_RESOLUTION_RE.search(name):
+        return True
+
+    # ── Pass 4d: handicap / spread / prop bet markets ──────────────────
+    if any(pat in nl for pat in _HANDICAP_SPREAD_PATTERNS):
         return True
 
     # ── Pass 5: generic noise ─────────────────────────────────────────

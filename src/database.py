@@ -2110,14 +2110,28 @@ class Database:
         hours: int = 24,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
-        """Get recent alerts for the dashboard story feed, newest first."""
+        """Get recent alerts for the dashboard story feed, newest first.
+
+        Enriches each alert with the latest volume_24h and end_date from
+        market_snapshots via a correlated subquery.
+        """
         cutoff = (_utcnow() - timedelta(hours=hours)).isoformat()
 
         with self._get_conn() as conn:
             rows = conn.execute("""
-                SELECT * FROM alert_history
-                WHERE timestamp > ?
-                ORDER BY timestamp DESC
+                SELECT ah.*,
+                       ms.volume_24h  AS snapshot_volume_24h,
+                       ms.end_date    AS snapshot_end_date
+                FROM alert_history ah
+                LEFT JOIN market_snapshots ms
+                    ON ah.market_id = ms.market_id
+                   AND ms.rowid = (
+                       SELECT ms2.rowid FROM market_snapshots ms2
+                       WHERE ms2.market_id = ah.market_id
+                       ORDER BY ms2.timestamp DESC LIMIT 1
+                   )
+                WHERE ah.timestamp > ?
+                ORDER BY ah.timestamp DESC
                 LIMIT ?
             """, (cutoff, limit)).fetchall()
 
