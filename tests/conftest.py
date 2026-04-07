@@ -68,8 +68,17 @@ markets:
 """
     )
 
-    # Patch brain_root to use tmp_path
-    monkeypatch.setattr(brain_io, "brain_root", lambda: tmp_path)
+    # Patch brain_root everywhere it's been imported
+    root_fn = lambda: tmp_path
+    monkeypatch.setattr(brain_io, "brain_root", root_fn)
+
+    # Also patch in extract.py if it's been imported
+    try:
+        import extract
+        monkeypatch.setattr(extract, "brain_root", root_fn)
+    except ImportError:
+        pass
+
     # Reset hash cache since we changed the root
     brain_io.reset_hash_cache()
     brain_io._HASHES_PATH = None
