@@ -1,0 +1,4 @@
+# Extraction output JSON files are generated artifacts — don't commit.
+# The .extracted registry and this .gitignore are tracked.
+*.json
+!.gitignore
