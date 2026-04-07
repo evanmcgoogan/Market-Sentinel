@@ -1,8 +1,9 @@
-# Local secrets
+# === Secrets ===
 config.json
-config.json^X
+.env
+*.secret
 
-# Python cache/build
+# === Python ===
 __pycache__/
 *.py[cod]
 *.pyo
@@ -11,19 +12,23 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+*.egg-info/
+dist/
+build/
 
-# Runtime data/logs
-*.log
+# === V2 Legacy (safe to ignore in V3 branch) ===
 *.db
 *.db-shm
 *.db-wal
 market_sentinel.db*
 sentinel.db*
+*.log
 
-# OS/editor
+# === OS / Editor ===
 .DS_Store
 *.swp
 *.swo
+Thumbs.db
 
-# Local app state
+# === Local state ===
 .claude/

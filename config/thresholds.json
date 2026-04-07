@@ -1,0 +1,26 @@
+{
+  "_comment": "Scoring and alert thresholds. Tuned via evals/ feedback loop.",
+  "triage": {
+    "high_signal_min_score": 0.7,
+    "medium_signal_min_score": 0.4,
+    "s_tier_always_extract": true,
+    "a_tier_always_extract": true,
+    "b_tier_triage_first": true,
+    "c_tier_triage_first": true
+  },
+  "compilation": {
+    "max_pages_per_extraction": 10,
+    "min_signal_strength_to_compile": 0.3
+  },
+  "lint": {
+    "stale_claim_days": 30,
+    "stale_source_days": 30,
+    "min_predictions_for_reliability": 30,
+    "source_drift_check_window_days": 90
+  },
+  "predictions": {
+    "min_for_hit_rate": 10,
+    "min_for_reliability_score": 30,
+    "overdue_buffer_days": 7
+  }
+}

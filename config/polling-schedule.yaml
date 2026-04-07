@@ -1,0 +1,39 @@
+# Market-Aware Polling Schedule
+#
+# Three modes based on time of day and market hours.
+# All times in US Eastern.
+
+modes:
+  active:
+    when: "Mon-Fri 09:00-16:30 ET"
+    description: "US market hours. Maximum attention."
+    twitter_poll_minutes: 5
+    youtube_check_minutes: 15
+    market_poll_minutes: 5
+    extraction_interval: "every 2 hours or triggered by high_signal triage"
+    compilation: "triggered by extraction completion"
+
+  watch:
+    when: "Mon-Fri 16:30-20:00 ET, Sun 18:00-23:59 ET"
+    description: "After-hours and Sunday evening pre-market."
+    twitter_poll_minutes: 10
+    youtube_check_minutes: 30
+    market_poll_minutes: 15
+    extraction_interval: "every 4 hours"
+    compilation: "daily batch at 20:00 ET"
+
+  sleep:
+    when: "All other times"
+    description: "Overnight and weekends. Minimal polling."
+    twitter_poll_minutes: 30
+    youtube_check_minutes: 60
+    market_poll_minutes: 60
+    extraction_interval: "daily batch at 06:00 ET"
+    compilation: "daily batch at 06:30 ET"
+
+recurring:
+  lint: "weekly, Sunday 03:00 ET"
+  deep_synthesis: "monthly, 1st Sunday 04:00 ET"
+  source_review: "monthly, 1st Sunday 05:00 ET"
+  git_commit: "every 60 min (skip if no changes)"
+  git_push: "every 60 min (after commit)"

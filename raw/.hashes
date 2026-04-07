@@ -1,0 +1,4 @@
+# Content hashes for deduplication. One hash per line.
+# Format: {source_type}:{unique_id}:{content_hash}
+# Example: twitter:1234567890:a1b2c3d4e5f6
+# This file is append-only. Never remove entries.

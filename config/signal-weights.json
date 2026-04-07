@@ -1,0 +1,38 @@
+{
+  "_comment": "Signal weights for extraction triage and compilation priority. Tuned over time via evals/experiments/.",
+  "extraction": {
+    "claim": {
+      "base_weight": 0.5,
+      "s_tier_multiplier": 1.5,
+      "a_tier_multiplier": 1.2,
+      "b_tier_multiplier": 1.0,
+      "c_tier_multiplier": 0.7
+    },
+    "prediction": {
+      "base_weight": 0.9,
+      "s_tier_multiplier": 1.5,
+      "a_tier_multiplier": 1.3,
+      "b_tier_multiplier": 1.0,
+      "c_tier_multiplier": 0.8
+    },
+    "data_point": {
+      "base_weight": 0.3,
+      "tier_multiplier_applies": false
+    },
+    "event": {
+      "base_weight": 0.7,
+      "s_tier_multiplier": 1.3,
+      "a_tier_multiplier": 1.1,
+      "b_tier_multiplier": 1.0,
+      "c_tier_multiplier": 0.8
+    },
+    "opinion": {
+      "base_weight": 0.2,
+      "s_tier_multiplier": 2.0,
+      "a_tier_multiplier": 1.0,
+      "b_tier_multiplier": 0.5,
+      "c_tier_multiplier": 0.3
+    }
+  },
+  "_triage_note": "Triage thresholds are defined in thresholds.json. Do not duplicate here."
+}
