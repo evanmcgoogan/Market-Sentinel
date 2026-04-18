@@ -5,44 +5,850 @@
 #   A: High signal. Key claims extracted.
 #   B: Useful signal. Triage first, extract if signal.
 #   C: Ambient. Triage only. Promote on merit.
+#
+# 126 X accounts, 30 YouTube channels, 3 market sources.
+# Last updated: 2026-04-18 — corrected 9 channel IDs (All-In, Lex, Dwarkesh, Founders,
+# 20VC, TWIST, Matthew Berman, Asianometry, a16z, The Space Race)
 
 twitter:
-  api: socialdata                        # socialdata | twitterapiio | official
+  api: socialdata
   poll_interval_minutes: 10
   accounts:
-    # === S-TIER ===
-    # Populated from your curated follow list.
-    # Format:
-    #   - handle: username
-    #     tier: S
-    #     domains: [domain1, domain2]
-    #     notes: "Why this source matters"
+    # === S-TIER (6) ===
+    # Every post extracted. These shape your world model directly.
 
-    # === A-TIER ===
+    - handle: karpathy
+      tier: S
+      domains: [ai, deep-learning, software]
+      notes: "Frontier AI researcher. Autoresearch thesis originator. Every claim tracked."
 
-    # === B-TIER ===
+    - handle: elonmusk
+      tier: S
+      domains: [ai, space, energy, geopolitics, macro]
+      notes: "Moves markets. Tesla/SpaceX/xAI/DOGE. Signal-to-noise varies but impact is undeniable."
 
-    # === C-TIER ===
+    - handle: sama
+      tier: S
+      domains: [ai, startups, policy, macro]
+      notes: "OpenAI CEO. Frontier lab direction, AGI timeline signals."
+
+    - handle: DavidSacks
+      tier: S
+      domains: [ai, startups, geopolitics, macro, policy]
+      notes: "All-In Pod. Now in government (AI/crypto czar). Policy + market crossover."
+
+    - handle: pmarca
+      tier: S
+      domains: [ai, startups, macro, culture, policy]
+      notes: "a16z co-founder. Techno-optimist manifesto. Venture + macro worldview."
+
+    - handle: evanmcgoogan01
+      tier: S
+      domains: [ai, macro, investing, geopolitics]
+      notes: "Your own account. Self-reference for tracking your public positions."
+
+    # === A-TIER (25) ===
+    # High signal. Key claims extracted.
+
+    - handle: chamath
+      tier: A
+      domains: [macro, startups, geopolitics, policy]
+      notes: "All-In Pod. Social Capital. Macro + venture crossover."
+
+    - handle: naval
+      tier: A
+      domains: [ai, startups, philosophy, investing]
+      notes: "AngelList founder. First-principles thinker. Low volume, high signal."
+
+    - handle: balajis
+      tier: A
+      domains: [ai, crypto, geopolitics, macro, technology]
+      notes: "Network State. Contrarian macro calls. High conviction, falsifiable."
+
+    - handle: paulg
+      tier: A
+      domains: [startups, ai, technology, culture]
+      notes: "YC founder. Essays move the startup world."
+
+    - handle: ilyasut
+      tier: A
+      domains: [ai, deep-learning]
+      notes: "SSI co-founder. Ex-OpenAI chief scientist. Rare posts but maximum signal."
+
+    - handle: demishassabis
+      tier: A
+      domains: [ai, deep-learning, science]
+      notes: "DeepMind CEO. AlphaFold. Science-track AI."
+
+    - handle: ylecun
+      tier: A
+      domains: [ai, deep-learning]
+      notes: "Meta chief AI scientist. Strong opinions on architecture. Debates matter."
+
+    - handle: AnthropicAI
+      tier: A
+      domains: [ai, safety, policy]
+      notes: "Our model provider. Constitutional AI. Policy direction."
+
+    - handle: OpenAI
+      tier: A
+      domains: [ai, deep-learning, policy]
+      notes: "Frontier lab. Product launches move markets."
+
+    - handle: GoogleDeepMind
+      tier: A
+      domains: [ai, deep-learning, science]
+      notes: "Frontier lab. Gemini, AlphaFold, robotics."
+
+    - handle: GavinSBaker
+      tier: A
+      domains: [ai, macro, semiconductors, investing]
+      notes: "Atreides Management. Deep AI capex analysis."
+
+    - handle: SemiAnalysis_
+      tier: A
+      domains: [semiconductors, ai, supply-chain]
+      notes: "Dylan Patel's firm. Best semiconductor analysis on X."
+
+    - handle: dylan522p
+      tier: A
+      domains: [semiconductors, ai, supply-chain]
+      notes: "SemiAnalysis founder. Personal account, more raw takes."
+
+    - handle: nntaleb
+      tier: A
+      domains: [macro, risk, philosophy, geopolitics]
+      notes: "Black Swan author. Anti-fragility. Contrarian risk frameworks."
+
+    - handle: RayDalio
+      tier: A
+      domains: [macro, geopolitics, investing]
+      notes: "Bridgewater founder. Macro regime frameworks. Debt cycles."
+
+    - handle: BillAckman
+      tier: A
+      domains: [macro, investing, policy]
+      notes: "Pershing Square. High-conviction macro trades. Public positions."
+
+    - handle: friedberg
+      tier: A
+      domains: [macro, climate, agriculture, ai]
+      notes: "All-In Pod. Production Board. Cross-domain thinker."
+
+    - handle: JosephJacks_
+      tier: A
+      domains: [ai, open-source, startups]
+      notes: "OSSC founder. Open-source AI ecosystem intelligence."
+
+    - handle: altcap
+      tier: A
+      domains: [ai, macro, investing]
+      notes: "Brad Gerstner. Altimeter Capital. AI capex thesis."
+
+    - handle: garrytan
+      tier: A
+      domains: [startups, ai, policy]
+      notes: "YC president. Startup ecosystem pulse."
+
+    - handle: eladgil
+      tier: A
+      domains: [ai, startups, investing]
+      notes: "Serial founder/investor. AI infrastructure bets."
+
+    - handle: vkhosla
+      tier: A
+      domains: [ai, energy, climate, startups]
+      notes: "Khosla Ventures. Energy + AI intersection."
+
+    - handle: unusual_whales
+      tier: A
+      domains: [markets, whale-flow, options]
+      notes: "Options flow intelligence. Whale tracking. Quantitative edge."
+
+    - handle: Geiger_Capital
+      tier: A
+      domains: [macro, real-estate, markets]
+      notes: "Macro data visualization. Housing + rates focus."
+
+    - handle: cremieuxrecueil
+      tier: A
+      domains: [data-science, demographics, policy]
+      notes: "Data-driven analysis. High rigor. Falsifiable claims."
+
+    # === B-TIER (60) ===
+    # Useful signal. Triage first, extract if signal detected.
+
+    - handle: ericschmidt
+      tier: B
+      domains: [ai, geopolitics, technology]
+      notes: "Ex-Google CEO. AI + defense nexus."
+
+    - handle: satyanadella
+      tier: B
+      domains: [ai, cloud, enterprise]
+      notes: "Microsoft CEO. Azure/OpenAI partnership signals."
+
+    - handle: sundarpichai
+      tier: B
+      domains: [ai, cloud, search]
+      notes: "Google CEO. Gemini direction."
+
+    - handle: JeffBezos
+      tier: B
+      domains: [ai, space, logistics, media]
+      notes: "Amazon/Blue Origin. Rare posts but market-moving."
+
+    - handle: bchesky
+      tier: B
+      domains: [startups, product, ai]
+      notes: "Airbnb CEO. Product design philosophy."
+
+    - handle: LisaSu
+      tier: B
+      domains: [semiconductors, ai]
+      notes: "AMD CEO. Semiconductor competition signals."
+
+    - handle: tobi
+      tier: B
+      domains: [ai, e-commerce, startups]
+      notes: "Shopify CEO. AI-native business operations."
+
+    - handle: PalmerLuckey
+      tier: B
+      domains: [defense, ai, technology]
+      notes: "Anduril founder. Defense tech + AI."
+
+    - handle: reidhoffman
+      tier: B
+      domains: [ai, startups, investing]
+      notes: "LinkedIn founder. Greylock. AI ecosystem."
+
+    - handle: collision
+      tier: B
+      domains: [startups, fintech, macro]
+      notes: "Stripe co-founder. Payments + economic signals."
+
+    - handle: patrickc
+      tier: B
+      domains: [startups, fintech, macro, science]
+      notes: "Stripe co-founder. Broader intellectual interests."
+
+    - handle: gdb
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "Greg Brockman. OpenAI co-founder."
+
+    - handle: miramurati
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "Ex-OpenAI CTO. Now building independently."
+
+    - handle: alexandr_wang
+      tier: B
+      domains: [ai, defense, data]
+      notes: "Scale AI CEO. AI + government intersection."
+
+    - handle: janleike
+      tier: B
+      domains: [ai, safety]
+      notes: "Anthropic alignment lead. Ex-OpenAI. Safety research direction."
+
+    - handle: polynoamial
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "Noam Brown. OpenAI. Reasoning and game theory AI."
+
+    - handle: bobmcgrewai
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "Bob McGrew. Ex-OpenAI VP Research."
+
+    - handle: DrJimFan
+      tier: B
+      domains: [ai, robotics, deep-learning]
+      notes: "Jim Fan. NVIDIA AI. Embodied intelligence."
+
+    - handle: drfeifei
+      tier: B
+      domains: [ai, computer-vision, science]
+      notes: "Fei-Fei Li. Stanford. World Labs. Spatial intelligence."
+
+    - handle: chrmanning
+      tier: B
+      domains: [ai, nlp, deep-learning]
+      notes: "Christopher Manning. Stanford NLP."
+
+    - handle: AndrewYNg
+      tier: B
+      domains: [ai, education, deep-learning]
+      notes: "Andrew Ng. AI Fund. Coursera."
+
+    - handle: geoffreyhinton
+      tier: B
+      domains: [ai, deep-learning, safety]
+      notes: "Godfather of deep learning. AI risk signals."
+
+    - handle: lexfridman
+      tier: B
+      domains: [ai, science, culture, geopolitics]
+      notes: "Podcast host. Interview signals from guests."
+
+    - handle: tegmark
+      tier: B
+      domains: [ai, physics, safety]
+      notes: "Max Tegmark. MIT. AI existential risk."
+
+    - handle: stephen_wolfram
+      tier: B
+      domains: [ai, computation, science]
+      notes: "Wolfram Research. Computational universe framework."
+
+    - handle: DavidDeutschOxf
+      tier: B
+      domains: [physics, philosophy, computation]
+      notes: "Constructor theory. Deep epistemology."
+
+    - handle: bhorowitz
+      tier: B
+      domains: [startups, ai, investing, culture]
+      notes: "a16z co-founder. Hard thing about hard things."
+
+    - handle: roelofbotha
+      tier: B
+      domains: [startups, ai, investing]
+      notes: "Sequoia managing partner."
+
+    - handle: SethGRosenberg
+      tier: B
+      domains: [ai, startups, investing]
+      notes: "Greylock partner. AI infrastructure."
+
+    - handle: mwseibel
+      tier: B
+      domains: [startups, ai]
+      notes: "Michael Seibel. YC managing director."
+
+    - handle: bgurley
+      tier: B
+      domains: [startups, investing, marketplaces]
+      notes: "Bill Gurley. Benchmark. Marketplace dynamics."
+
+    - handle: EMostaque
+      tier: B
+      domains: [ai, open-source, geopolitics]
+      notes: "Emad Mostaque. Ex-Stability AI. Contrarian AI views."
+
+    - handle: beffjezos
+      tier: B
+      domains: [ai, e-acc, technology]
+      notes: "e/acc movement leader. Acceleration thesis."
+
+    - handle: VivekGRamaswamy
+      tier: B
+      domains: [policy, ai, biotech]
+      notes: "Political figure. Regulation + tech policy signals."
+
+    - handle: FoundersPodcast
+      tier: B
+      domains: [startups, history, investing]
+      notes: "David Senra. Historical founder pattern recognition."
+
+    - handle: DaveShapi
+      tier: B
+      domains: [ai, safety, macro]
+      notes: "David Shapiro. AI commentary and alignment."
+
+    - handle: thecaptain_nemo
+      tier: B
+      domains: [ai, macro, technology]
+      notes: "AI and tech commentary."
+
+    - handle: 10x_er
+      tier: B
+      domains: [ai, engineering, technology]
+      notes: "Engineering and AI signal."
+
+    - handle: calebwatney
+      tier: B
+      domains: [ai, policy, macro]
+      notes: "AI policy institute. Regulatory signals."
+
+    - handle: CostaYian
+      tier: B
+      domains: [startups, ai, investing]
+      notes: "Venture capital perspective."
+
+    - handle: dustinvtran
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "Dustin Tran. Google Brain alum. ML research."
+
+    - handle: DylanMitic
+      tier: B
+      domains: [ai, macro, investing]
+      notes: "AI and market analysis."
+
+    - handle: sumanyu
+      tier: B
+      domains: [ai, technology]
+      notes: "Tech industry perspective."
+
+    - handle: WalterIsaacson
+      tier: B
+      domains: [technology, history, biography]
+      notes: "Biographer. Musk, Jobs, Einstein. Historical pattern context."
+
+    - handle: arankomatsuzaki
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "AI paper tracker. Research signal aggregator."
+
+    - handle: sundeep
+      tier: B
+      domains: [ai, startups, product]
+      notes: "Sunny Madra. Product and AI perspective."
+
+    - handle: SecScottBessent
+      tier: B
+      domains: [macro, policy, treasury]
+      notes: "Treasury Secretary. Fiscal policy signals."
+
+    - handle: SecretaryWright
+      tier: B
+      domains: [energy, policy]
+      notes: "Energy Secretary Chris Wright. Energy policy direction."
+
+    - handle: Jack
+      tier: B
+      domains: [technology, crypto, social-media]
+      notes: "Jack Dorsey. Block. Bitcoin. Social media future."
+
+    - handle: Jason
+      tier: B
+      domains: [startups, ai, investing]
+      notes: "Jason Calacanis. TWIST. All-In Pod. Early-stage signals."
+
+    - handle: TuckerCarlson
+      tier: B
+      domains: [geopolitics, policy, culture]
+      notes: "Media personality. Political signal. Contrarian takes."
+
+    - handle: victlazarte
+      tier: B
+      domains: [startups, ai, investing]
+      notes: "Victor Lazarte. Tech and venture perspective."
+
+    - handle: kepano
+      tier: B
+      domains: [ai, product, knowledge-management]
+      notes: "Obsidian CEO. Knowledge management future."
+
+    - handle: YuchenJ_UW
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "AI research perspective."
+
+    - handle: theallinpod
+      tier: B
+      domains: [ai, macro, geopolitics, startups]
+      notes: "All-In Podcast account. Episode signals."
+
+    - handle: BG2Pod
+      tier: B
+      domains: [ai, enterprise, investing]
+      notes: "Bg2 Pod account. Enterprise tech + AI."
+
+    - handle: FFPPod
+      tier: B
+      domains: [science, technology, philosophy]
+      notes: "From First Principles Pod."
+
+    - handle: 3blue1brown
+      tier: B
+      domains: [mathematics, education, ai]
+      notes: "Grant Sanderson. Math explanations. Occasionally AI-relevant."
+
+    - handle: TOEwithCurt
+      tier: B
+      domains: [physics, ai, philosophy]
+      notes: "Curt Jaimungal. Theories of Everything. Deep interviews."
+
+    - handle: AidanMcgoogan
+      tier: B
+      domains: [ai, technology]
+      notes: "Personal network signal."
+
+    # === C-TIER (35) ===
+    # Ambient. Triage only. Promote on merit.
+
+    - handle: NVIDIAAI
+      tier: C
+      domains: [ai, semiconductors]
+      notes: "NVIDIA AI division. Product announcements."
+
+    - handle: nvidia
+      tier: C
+      domains: [semiconductors, ai, gaming]
+      notes: "NVIDIA corporate. Earnings, launches."
+
+    - handle: AMD
+      tier: C
+      domains: [semiconductors, ai]
+      notes: "AMD corporate account."
+
+    - handle: SKhynix
+      tier: C
+      domains: [semiconductors, memory]
+      notes: "SK hynix. HBM supply signals."
+
+    - handle: Tesla
+      tier: C
+      domains: [ev, ai, energy, robotics]
+      notes: "Tesla corporate. Product + FSD signals."
+
+    - handle: SpaceX
+      tier: C
+      domains: [space, defense]
+      notes: "SpaceX corporate. Launch cadence."
+
+    - handle: neuralink
+      tier: C
+      domains: [ai, biotech, neuroscience]
+      notes: "Neuralink corporate. BCI progress."
+
+    - handle: GroqInc
+      tier: C
+      domains: [ai, semiconductors, inference]
+      notes: "Groq. Inference hardware competition."
+
+    - handle: claudeai
+      tier: C
+      domains: [ai]
+      notes: "Claude product account."
+
+    - handle: grok
+      tier: C
+      domains: [ai]
+      notes: "Grok product account."
+
+    - handle: windsurf
+      tier: C
+      domains: [ai, developer-tools]
+      notes: "Windsurf coding assistant."
+
+    - handle: AIatMeta
+      tier: C
+      domains: [ai, open-source]
+      notes: "Meta AI. Llama releases."
+
+    - handle: GoogleAI
+      tier: C
+      domains: [ai]
+      notes: "Google AI corporate."
+
+    - handle: huggingface
+      tier: C
+      domains: [ai, open-source, ml-ops]
+      notes: "Hugging Face. Open-source AI hub."
+
+    - handle: IsomorphicLabs
+      tier: C
+      domains: [ai, biotech, drug-discovery]
+      notes: "DeepMind spinoff. AI for drug discovery."
+
+    - handle: StanfordAILab
+      tier: C
+      domains: [ai, deep-learning]
+      notes: "Stanford AI Lab research."
+
+    - handle: stanfordnlp
+      tier: C
+      domains: [ai, nlp]
+      notes: "Stanford NLP Group."
+
+    - handle: MIT_CSAIL
+      tier: C
+      domains: [ai, computer-science]
+      notes: "MIT CSAIL research."
+
+    - handle: a16z
+      tier: C
+      domains: [startups, ai, investing]
+      notes: "a16z firm account. Higher volume, lower signal than individuals."
+
+    - handle: sequoia
+      tier: C
+      domains: [startups, investing]
+      notes: "Sequoia Capital firm account."
+
+    - handle: benchmark
+      tier: C
+      domains: [startups, investing]
+      notes: "Benchmark firm account."
+
+    - handle: GreylockVC
+      tier: C
+      domains: [startups, ai, investing]
+      notes: "Greylock firm account."
+
+    - handle: generalcatalyst
+      tier: C
+      domains: [startups, investing]
+      notes: "General Catalyst firm account."
+
+    - handle: foundersfund
+      tier: C
+      domains: [startups, investing, defense]
+      notes: "Founders Fund firm account."
+
+    - handle: Techstars
+      tier: C
+      domains: [startups]
+      notes: "Techstars accelerator."
+
+    - handle: ycombinator
+      tier: C
+      domains: [startups, ai]
+      notes: "YC firm account."
+
+    - handle: DOGE
+      tier: C
+      domains: [policy, government]
+      notes: "Dept of Government Efficiency."
+
+    - handle: ENERGY
+      tier: C
+      domains: [energy, policy]
+      notes: "US Department of Energy."
+
+    - handle: ii_posts
+      tier: C
+      domains: [ai, technology]
+      notes: "Intelligent Internet."
+
+    - handle: aidigest_
+      tier: C
+      domains: [ai]
+      notes: "AI Digest. AI news aggregation."
+
+    - handle: kevg1412
+      tier: C
+      domains: [ai, technology]
+      notes: "Kevin Gee. Tech perspective."
+
+    - handle: QuantaMagazine
+      tier: C
+      domains: [science, mathematics, physics]
+      notes: "Science journalism. Background signal."
+
+    - handle: TechCrunch
+      tier: C
+      domains: [startups, ai, technology]
+      notes: "Tech news. High volume, triage heavily."
+
+    - handle: ScienceNews
+      tier: C
+      domains: [science]
+      notes: "Science news aggregation."
+
+    - handle: BBCWorld
+      tier: C
+      domains: [geopolitics, macro]
+      notes: "BBC World News. Geopolitical baseline."
 
 youtube:
   poll_interval_minutes: 30
   transcript_method: youtube-transcript-api
   transcript_fallback: whisper-api
-  whisper_wait_hours: 2                  # Wait for auto-captions before fallback
+  whisper_wait_hours: 2
   channels:
-    # === S-TIER ===
-    # Format:
-    #   - name: "Channel Name"
-    #     channel_id: "UCxxxxxxxxx"
-    #     tier: S
-    #     domains: [domain1, domain2]
-    #     notes: "Why this source matters"
+    # === S-TIER (3) ===
 
-    # === A-TIER ===
+    - name: "All-In Podcast"
+      channel_id: "UCESLZhusAkFfsNsApnjF_Cg"
+      tier: S
+      domains: [ai, macro, geopolitics, startups, investing]
+      notes: "Chamath, Sacks, Friedberg, Calacanis. Cross-domain macro synthesis."
 
-    # === B-TIER ===
+    - name: "Lex Fridman"
+      channel_id: "UCSHZKyawb77ixDdsGog4iWA"
+      tier: S
+      domains: [ai, science, geopolitics, philosophy]
+      notes: "Long-form interviews with frontier thinkers. High extraction value."
 
-    # === C-TIER ===
+    - name: "Dwarkesh Patel"
+      channel_id: "UCQ6mPa_ZhBBu9w8431TI38A"
+      tier: S
+      domains: [ai, history, technology, macro]
+      notes: "Deep interviews. Karpathy, Zuckerberg, Cowen. Exceptional signal density."
+
+    # === A-TIER (10) ===
+
+    - name: "Founders Podcast"
+      channel_id: "UCQ-rrUCsJLNjFdPtKq0YOfA"
+      tier: A
+      domains: [startups, history, investing]
+      notes: "David Senra. Historical founder pattern recognition."
+
+    - name: "20VC with Harry Stebbings"
+      channel_id: "UCf0PBRjhf0rF8fWBIxTuoWA"
+      tier: A
+      domains: [startups, ai, investing]
+      notes: "Top VC interviews. Deal flow signals."
+
+    - name: "Bg2 Pod"
+      channel_id: "UC-yRDvpR99LUc5l7i7jLzew"
+      tier: A
+      domains: [ai, enterprise, investing]
+      notes: "Bill Gurley and Brad Gerstner. Enterprise AI + investing."
+
+    - name: "This Week In Startups"
+      channel_id: "UCkkhmBWfS7pILYIk0izkc3A"
+      tier: A
+      domains: [startups, ai, investing]
+      notes: "Jason Calacanis. Startup ecosystem pulse."
+
+    - name: "From First Principles Podcast"
+      channel_id: "UC1Vuace_j2iSvm8rYNnF4eA"
+      tier: A
+      domains: [science, technology, philosophy]
+      notes: "Deep first-principles thinking."
+
+    - name: "Invest Like the Best"
+      channel_id: "UCpQBb0fToph3jrDulwz1iUQ"
+      tier: A
+      domains: [investing, macro, startups]
+      notes: "Patrick OShaughnessy. Investment frameworks."
+
+    - name: "David Shapiro"
+      channel_id: "UCvKRFNawVcuz4b9ihUTApCg"
+      tier: A
+      domains: [ai, safety, macro]
+      notes: "AI commentary. Alignment and macro crossover."
+
+    - name: "AI Explained"
+      channel_id: "UCNJ1Ymd5yFuUPtn21xtRbbw"
+      tier: A
+      domains: [ai, deep-learning]
+      notes: "AI model analysis. Paper breakdowns."
+
+    - name: "a16z"
+      channel_id: "UC9cn0TuPq4dnbTY-CBsm8XA"
+      tier: A
+      domains: [startups, ai, investing]
+      notes: "Andreessen Horowitz. Venture + tech thesis."
+
+    - name: "Asianometry"
+      channel_id: "UC1LpsuAUaKoMzzJSEt5WImw"
+      tier: A
+      domains: [semiconductors, supply-chain, technology]
+      notes: "Deep semiconductor and Asia tech analysis."
+
+    # === B-TIER (12) ===
+
+    - name: "ColdFusion"
+      channel_id: "UCGkpFfEMF0eMJlh9xXj2lMw"
+      tier: B
+      domains: [technology, ai, science]
+      notes: "Tech explainers. Good for emerging narratives."
+
+    - name: "Stanford Online"
+      channel_id: "UCBa5G_ESCn8Yd4vw5U-gIcg"
+      tier: B
+      domains: [ai, computer-science, education]
+      notes: "Stanford lectures and seminars."
+
+    - name: "Google DeepMind"
+      channel_id: "UCP7jMXSY2xbc3KCAE0MHQ-A"
+      tier: B
+      domains: [ai, deep-learning, science]
+      notes: "DeepMind research presentations."
+
+    - name: "Matthew Berman"
+      channel_id: "UCawZsQWqfGSbCI5yjkdVkTA"
+      tier: B
+      domains: [ai, deep-learning]
+      notes: "AI model reviews and demos."
+
+    - name: "Chris Williamson"
+      channel_id: "UCIaH-gZIVC432YRjNVvnyCA"
+      tier: B
+      domains: [culture, psychology, health]
+      notes: "Modern Wisdom. Cultural signal."
+
+    - name: "Nomad Capitalist"
+      channel_id: "UCnWyI50_Cqtc55bLnJzyekw"
+      tier: B
+      domains: [macro, tax, geopolitics, investing]
+      notes: "Global mobility and tax optimization."
+
+    - name: "Tousi TV"
+      channel_id: "UCjJec0wv1EUomjrBNt1xCTA"
+      tier: B
+      domains: [macro, real-estate, uk-markets]
+      notes: "UK macro and property market focus."
+
+    - name: "Quanta Magazine"
+      channel_id: "UCTpmmkp1E4nmZqWPS-dl5bg"
+      tier: B
+      domains: [science, mathematics, physics]
+      notes: "Science journalism. Background signal."
+
+    - name: "Cappy Army"
+      channel_id: "UCfzAICyqvu0ZIoySI30Netg"
+      tier: B
+      domains: [markets, investing]
+      notes: "Market analysis and commentary."
+
+    - name: "632nm"
+      channel_id: "UCwNuriNFsS-Ebdh_q-yuwOA"
+      tier: B
+      domains: [semiconductors, technology]
+      notes: "Semiconductor deep dives."
+
+    - name: "Deep Focus with John Kiriakou"
+      channel_id: "UCYr-WEJ0kTyZ7PzsLAlpisw"
+      tier: B
+      domains: [geopolitics, intelligence, policy]
+      notes: "Ex-CIA. Geopolitical intelligence."
+
+    - name: "Predictive History"
+      channel_id: "UC11aHtNnc5bEPLI4jf6mnYg"
+      tier: B
+      domains: [geopolitics, history]
+      notes: "Historical patterns for geopolitical prediction."
+
+    # === C-TIER (5) ===
+
+    - name: "Warfronts"
+      channel_id: "UCIiGa_w58FXLAZX99Go70oQ"
+      tier: C
+      domains: [geopolitics, defense]
+      notes: "Military and conflict analysis."
+
+    - name: "Megaprojects"
+      channel_id: "UCfAz00PExVrPfapl_W-MYOQ"
+      tier: C
+      domains: [engineering, infrastructure]
+      notes: "Large-scale engineering projects."
+
+    - name: "The Space Race"
+      channel_id: "UCeMcDx6-rOq_RlKSPehk2tQ"
+      tier: C
+      domains: [space, technology]
+      notes: "Space industry coverage."
+
+    - name: "Nate Jones"
+      channel_id: "PLACEHOLDER"
+      tier: C
+      domains: [investing, markets]
+      notes: "Handle @NateBJones did not resolve. Needs manual URL verification."
+
+    - name: "Places"
+      channel_id: "UC0woBco6Dgcxt0h8SwyyOmw"
+      tier: C
+      domains: [geography, geopolitics]
+      notes: "Resolved from @Places302. RSS title shows 'Megaprojects' — same creator."
 
 markets:
   sources:

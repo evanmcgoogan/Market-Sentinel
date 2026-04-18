@@ -47,6 +47,7 @@ Three layers. Never violate the boundaries.
 
 - Ingesting a source: `agent_docs/ingestion-workflow.md`
 - Compiling wiki updates: `agent_docs/compilation-workflow.md`
+- Synthesizing intelligence: `agent_docs/synthesis-workflow.md`
 - Answering questions: `agent_docs/query-workflow.md`
 - Health checking: `agent_docs/lint-workflow.md`
 
@@ -67,7 +68,7 @@ Three layers. Never violate the boundaries.
 - Raw transcripts: `raw/transcripts/{channel}/{video-id}--{slug}.md`
 - Raw market snapshots: `raw/markets/{platform}/YYYY-MM-DD-snapshot.md`
 - Raw articles: `raw/articles/YYYY-MM-DD--{slug}.md`
-- Synthesis pages: `YYYY-MM-DD--{type}-synthesis.md`
+- Synthesis pages: `YYYY-MM-DD--HHMM-{subtype}.md` (e.g., `2026-04-06--1400-intraday-brief.md`)
 - Source profiles: `wiki/sources/x-accounts/{handle}.md` or `wiki/sources/youtube-channels/{slug}.md`
 
 ## Build & Deploy

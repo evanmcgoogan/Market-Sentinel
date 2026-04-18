@@ -1,32 +1,14 @@
-# Market Sentinel Dependencies
-# Install with: pip install -r requirements.txt
-#
-# Versions pinned to major.minor to avoid surprise breakage on Render.
-# Bump these explicitly after testing.
+# V3 Signal Hunter — Digital Brain
+# Canonical dependency source is pyproject.toml.
+# This file exists only for tools/environments that don't support PEP 517.
+# Install with: pip install -e .
 
-# Async HTTP client
-aiohttp>=3.9.0,<4.0
-
-# Web dashboard
-Flask>=3.0.0,<4.0
-gunicorn>=22.0.0,<24.0
-
-# Market/LLM helpers used by dashboard features
-requests>=2.31.0,<3.0
-yfinance>=0.2.50,<2.0
-
-# Anthropic SDK — required for Claude headline generation, outlook, and whale intelligence
-anthropic>=0.39.0,<1.0
-
-# Stooq price data fallback (used when yfinance is rate-limited)
-pandas-datareader>=0.10.0,<1.0
-
-
-# No other dependencies needed - uses Python stdlib for:
-# - asyncio (async runtime)
-# - sqlite3 (database)
-# - json (config/data)
-# - logging (output)
-# - dataclasses (models)
-# - re (filtering)
-# - xml.etree.ElementTree (RSS parsing for news monitor)
+aiohttp>=3.9,<4.0
+requests>=2.31,<3.0
+anthropic>=0.39,<1.0
+fastapi>=0.115,<1.0
+uvicorn>=0.32,<1.0
+apscheduler>=3.10,<4.0
+pyyaml>=6.0,<7.0
+feedparser>=6.0,<7.0
+youtube-transcript-api>=0.6,<1.0

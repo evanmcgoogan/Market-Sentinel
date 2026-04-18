@@ -31,9 +31,40 @@ modes:
     extraction_interval: "daily batch at 06:00 ET"
     compilation: "daily batch at 06:30 ET"
 
+synthesis:
+  # Intraday briefs: Sonnet reframes all new intelligence since last brief.
+  # Fires during Active and Watch modes. Skips if no new extractions since last run.
+  intraday_brief:
+    model: sonnet
+    active_mode: "every 4 hours (10:00, 14:00, 18:00 ET)"
+    watch_mode: "once at 20:00 ET"
+    sleep_mode: "skip"
+    trigger: "also fires on-demand when 3+ high_signal extractions arrive within 2 hours"
+    cost_estimate: "~$0.25/run, ~$20/month"
+
+  # Daily wrap: Sonnet produces end-of-day synthesis covering all activity.
+  # Supersedes the day's intraday briefs.
+  daily_wrap:
+    model: sonnet
+    schedule: "daily at 21:00 ET"
+    cost_estimate: "~$0.40/run, ~$12/month"
+
+  # Weekly deep: Sonnet reviews the week's themes, thesis health, and source performance.
+  weekly_deep:
+    model: sonnet
+    schedule: "Sunday 04:00 ET"
+    cost_estimate: "~$0.60/run, ~$2.50/month"
+
+  # Monthly review: Opus performs deep structural analysis — cross-domain connections,
+  # thesis stress tests, source accuracy scoring, weak signal surfacing.
+  # This is where Opus justifies its cost with insights Sonnet can't reach.
+  monthly_review:
+    model: opus
+    schedule: "1st Sunday 05:00 ET"
+    cost_estimate: "~$5/run, ~$5/month"
+
 recurring:
   lint: "weekly, Sunday 03:00 ET"
-  deep_synthesis: "monthly, 1st Sunday 04:00 ET"
-  source_review: "monthly, 1st Sunday 05:00 ET"
+  source_review: "monthly, 1st Sunday 06:00 ET (after Opus monthly review)"
   git_commit: "every 60 min (skip if no changes)"
   git_push: "every 60 min (after commit)"

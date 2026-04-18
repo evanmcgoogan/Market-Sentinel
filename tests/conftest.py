@@ -33,6 +33,56 @@ def tmp_brain(tmp_path, monkeypatch):
     (tmp_path / "raw" / ".hashes").write_text("# Test hashes\n")
     (tmp_path / "log.md").write_text("# Test Log\n")
 
+    # Create index.md with standard section structure
+    (tmp_path / "index.md").write_text(
+        """# Digital Brain — Page Index
+
+## Entities — People
+
+_(No pages yet)_
+
+## Entities — Companies
+
+_(No pages yet)_
+
+## Entities — Institutions
+
+_(No pages yet)_
+
+## Themes
+
+_(No pages yet)_
+
+## Signals
+
+_(No pages yet)_
+
+## Theses
+
+_(No pages yet)_
+
+## Sources — X Accounts
+
+_(No pages yet)_
+
+## Sources — YouTube Channels
+
+_(No pages yet)_
+
+## Contradictions
+
+_(No pages yet)_
+
+## Syntheses
+
+_(No pages yet)_
+
+## Lint Reports
+
+_(No pages yet)_
+"""
+    )
+
     # Write a test sources.yaml
     (tmp_path / "config" / "sources.yaml").write_text(
         """twitter:
@@ -68,16 +118,38 @@ markets:
 """
     )
 
+    # Write a test polling-schedule.yaml
+    (tmp_path / "config" / "polling-schedule.yaml").write_text(
+        """modes:
+  active:
+    twitter_poll_minutes: 5
+    youtube_check_minutes: 15
+    market_poll_minutes: 5
+  watch:
+    twitter_poll_minutes: 10
+    youtube_check_minutes: 30
+    market_poll_minutes: 15
+  sleep:
+    twitter_poll_minutes: 30
+    youtube_check_minutes: 60
+    market_poll_minutes: 60
+"""
+    )
+
     # Patch brain_root everywhere it's been imported
     root_fn = lambda: tmp_path
     monkeypatch.setattr(brain_io, "brain_root", root_fn)
 
-    # Also patch in extract.py if it's been imported
-    try:
-        import extract
-        monkeypatch.setattr(extract, "brain_root", root_fn)
-    except ImportError:
-        pass
+    # Also patch in extract.py, compile.py, serve.py, synthesize.py if they've been imported
+    for mod_name in ("extract", "compile", "serve", "synthesize"):
+        try:
+            mod = __import__(mod_name)
+            monkeypatch.setattr(mod, "brain_root", root_fn)
+            # Reset compile.py template cache
+            if hasattr(mod, "reset_template_cache"):
+                mod.reset_template_cache()
+        except ImportError:
+            pass
 
     # Reset hash cache since we changed the root
     brain_io.reset_hash_cache()

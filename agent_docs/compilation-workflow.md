@@ -83,3 +83,13 @@ When calling Sonnet for compilation, the prompt should be structured as:
 6. **Assistant**: Updated wiki pages as structured output
 
 Use prompt caching aggressively — the schema, templates, and index change rarely.
+
+## Synthesis Triggering
+
+Compilation feeds synthesis. After each compilation batch:
+
+1. **Record the compilation timestamp and extraction count** — synthesis uses this to know what's new
+2. **Check for high_signal burst** — if 3+ high_signal extractions compiled within a 2-hour window, trigger an event-driven synthesis immediately (see `agent_docs/synthesis-workflow.md`)
+3. **Tag affected theses** — the synthesis layer uses thesis affinity to prioritize what to reframe
+
+Compilation is the engine. Synthesis is the lens. They run in sequence: collect → extract → compile → synthesize.

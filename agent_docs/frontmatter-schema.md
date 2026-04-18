@@ -148,10 +148,13 @@ Complete YAML frontmatter specification for all wiki page types. Every wiki page
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `subtype` | enum | yes | `weekly-macro` \| `monthly-macro` \| `thesis-stress-test` \| `weak-signal-report` \| `source-review` \| `connection-discovery` |
-| `period_start` | date | yes | YYYY-MM-DD |
-| `period_end` | date | yes | YYYY-MM-DD |
+| `subtype` | enum | yes | `intraday-brief` \| `daily-wrap` \| `weekly-deep` \| `monthly-review` \| `thesis-stress-test` \| `weak-signal-report` \| `source-review` \| `connection-discovery` \| `event-driven` |
+| `period_start` | datetime | yes | ISO 8601 (YYYY-MM-DDTHH:MM:SSZ for intraday, YYYY-MM-DD for daily+) |
+| `period_end` | datetime | yes | ISO 8601 (YYYY-MM-DDTHH:MM:SSZ for intraday, YYYY-MM-DD for daily+) |
 | `model` | string | yes | Which model generated the synthesis |
+| `extraction_count` | integer | yes | Number of extractions synthesized in this run |
+| `high_signal_count` | integer | no | Number of high_signal extractions in this run |
+| `supersedes` | string[] | no | Paths to syntheses this one replaces (daily supersedes intraday, etc.) |
 | `themes_covered` | string[] | no | `[[wikilink]]` format |
 | `theses_covered` | string[] | no | `[[wikilink]]` format |
 | `sources_referenced` | integer | yes | Count of distinct raw sources cited |

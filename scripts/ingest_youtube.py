@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 YOUTUBE_RSS_BASE = "https://www.youtube.com/feeds/videos.xml"
 MAX_TRANSCRIPT_RETRIES = 2
+# YouTube RSS feeds have known intermittent 404 outages (platform-side issue, Feb-Apr 2026+).
+# We retry with backoff to handle transient failures gracefully.
+RSS_RETRY_ATTEMPTS = 3
+RSS_RETRY_BACKOFF_S = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -51,19 +55,32 @@ async def fetch_channel_feed(
     """Fetch recent videos from a YouTube channel's RSS feed.
 
     Returns list of dicts with: video_id, title, published, link.
+
+    Retries up to RSS_RETRY_ATTEMPTS times with backoff to handle YouTube's
+    intermittent RSS 404 outages (platform-side issue, not a channel ID problem).
     """
     url = f"{YOUTUBE_RSS_BASE}?channel_id={channel_id}"
-    try:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                logger.warning("RSS fetch failed for %s: HTTP %d", channel_id, resp.status)
-                return []
-            text = await resp.text()
-    except Exception as e:
-        logger.error("RSS fetch error for %s: %s", channel_id, e)
-        return []
+    last_status: int | None = None
 
-    return parse_atom_feed(text)
+    for attempt in range(RSS_RETRY_ATTEMPTS):
+        try:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    return parse_atom_feed(text)
+                last_status = resp.status
+                if attempt < RSS_RETRY_ATTEMPTS - 1:
+                    await asyncio.sleep(RSS_RETRY_BACKOFF_S * (attempt + 1))
+        except Exception as e:
+            logger.error("RSS fetch error for %s (attempt %d): %s", channel_id, attempt + 1, e)
+            if attempt < RSS_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(RSS_RETRY_BACKOFF_S * (attempt + 1))
+
+    logger.warning(
+        "RSS fetch failed for %s after %d attempts: HTTP %s",
+        channel_id, RSS_RETRY_ATTEMPTS, last_status or "connection error",
+    )
+    return []
 
 
 def parse_atom_feed(xml_text: str) -> list[dict[str, str]]:
