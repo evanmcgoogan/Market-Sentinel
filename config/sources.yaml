@@ -839,10 +839,10 @@ youtube:
       notes: "Space industry coverage."
 
     - name: "Nate Jones"
-      channel_id: "PLACEHOLDER"
+      channel_id: "UC0C-17n9iuUQPylguM1d-lQ"
       tier: C
-      domains: [investing, markets]
-      notes: "Handle @NateBJones did not resolve. Needs manual URL verification."
+      domains: [ai, strategy, product]
+      notes: "AI News & Strategy Daily. 20-year PM veteran. @NateBJones."
 
     - name: "Places"
       channel_id: "UC0woBco6Dgcxt0h8SwyyOmw"
