@@ -10,6 +10,8 @@ modes:
     twitter_poll_minutes: 5
     youtube_check_minutes: 15
     market_poll_minutes: 5
+    arxiv_poll_minutes: 60
+    substack_poll_minutes: 60
     extraction_interval: "every 2 hours or triggered by high_signal triage"
     compilation: "triggered by extraction completion"
 
@@ -19,6 +21,8 @@ modes:
     twitter_poll_minutes: 10
     youtube_check_minutes: 30
     market_poll_minutes: 15
+    arxiv_poll_minutes: 120
+    substack_poll_minutes: 120
     extraction_interval: "every 4 hours"
     compilation: "daily batch at 20:00 ET"
 
@@ -28,6 +32,8 @@ modes:
     twitter_poll_minutes: 30
     youtube_check_minutes: 60
     market_poll_minutes: 60
+    arxiv_poll_minutes: 240
+    substack_poll_minutes: 240
     extraction_interval: "daily batch at 06:00 ET"
     compilation: "daily batch at 06:30 ET"
 

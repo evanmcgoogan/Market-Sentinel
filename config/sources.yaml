@@ -850,6 +850,154 @@ youtube:
       domains: [geography, geopolitics]
       notes: "Resolved from @Places302. RSS title shows 'Megaprojects' — same creator."
 
+arxiv:
+  # arXiv research paper ingestion — free API, no key required.
+  # Papers are ingested as abstracts. The extraction pipeline pulls key claims.
+  # Category reference: https://arxiv.org/category_taxonomy
+  categories:
+    - id: cs.AI
+      label: "Artificial Intelligence"
+      tier: A
+      domains: [ai, deep-learning]
+      notes: "Core AI papers. AGI architecture, reasoning, planning, knowledge."
+
+    - id: cs.LG
+      label: "Machine Learning"
+      tier: A
+      domains: [ai, deep-learning, ml]
+      notes: "ML theory and methods. Training dynamics, scaling laws, optimization."
+
+    - id: cs.CL
+      label: "Computation and Language (NLP)"
+      tier: A
+      domains: [ai, nlp, language-models]
+      notes: "LLM research. Fine-tuning, RLHF, tokenization, evaluation."
+
+    - id: cs.NE
+      label: "Neural and Evolutionary Computing"
+      tier: B
+      domains: [ai, deep-learning, neuroscience]
+      notes: "Neural architectures, brain-inspired computing."
+
+    - id: econ.GN
+      label: "General Economics"
+      tier: B
+      domains: [macro, economics]
+      notes: "Macro and labor economics. AI impact on economy."
+
+    - id: q-fin.GN
+      label: "General Finance"
+      tier: B
+      domains: [markets, finance, investing]
+      notes: "Quantitative finance. Market microstructure, risk."
+
+  # S-tier researcher watchlist — checked every poll regardless of category.
+  # Author names must match arXiv author field (full name, not handle).
+  author_watchlist:
+    - name: "Andrej Karpathy"
+      tier: S
+      domains: [ai, deep-learning, language-models]
+
+    - name: "Ilya Sutskever"
+      tier: S
+      domains: [ai, deep-learning, safety]
+
+    - name: "Yann LeCun"
+      tier: A
+      domains: [ai, deep-learning, architecture]
+
+    - name: "Demis Hassabis"
+      tier: A
+      domains: [ai, deep-learning, science]
+
+    - name: "Dario Amodei"
+      tier: A
+      domains: [ai, safety, policy]
+
+    - name: "Jan Leike"
+      tier: A
+      domains: [ai, safety, alignment]
+
+    - name: "Noam Brown"
+      tier: A
+      domains: [ai, reasoning, game-theory]
+
+    - name: "Jim Fan"
+      tier: A
+      domains: [ai, robotics, embodied]
+
+substack:
+  # Newsletter RSS ingestion — free, no API key required.
+  # Paywalled posts are detected by word count < 150 and flagged in frontmatter.
+  # Even truncated teasers carry signal (framing, thesis direction, topic focus).
+  newsletters:
+    # === A-TIER (5) — High signal, long-form thinking ===
+
+    - name: "Not Boring"
+      author: "Packy McCormick"
+      rss_url: "https://www.notboring.co/feed"
+      tier: A
+      domains: [ai, startups, tech-strategy, investing]
+      notes: "Deep-dive essays on emerging tech companies and market narratives."
+
+    - name: "The Diff"
+      author: "Byrne Hobart"
+      rss_url: "https://thediff.co/feed"
+      tier: A
+      domains: [finance, markets, complexity, macro]
+      notes: "Unusual connections between markets, tech, and history. Paywalled mostly."
+
+    - name: "Stratechery"
+      author: "Ben Thompson"
+      rss_url: "https://stratechery.com/feed/"
+      tier: A
+      domains: [tech-strategy, media, business, ai]
+      notes: "Aggregation theory and tech business strategy. Mostly paywalled."
+
+    - name: "Noahpinion"
+      author: "Noah Smith"
+      rss_url: "https://noahpinion.substack.com/feed"
+      tier: A
+      domains: [macro, economics, tech-policy, ai]
+      notes: "Econ takes on AI, trade, and industrial policy."
+
+    - name: "Astral Codex Ten"
+      author: "Scott Alexander"
+      rss_url: "https://astralcodexten.substack.com/feed"
+      tier: A
+      domains: [science, rationality, ai-risk, forecasting]
+      notes: "Careful reasoning on AI risk, forecasting, and complex systems."
+
+    # === B-TIER (4) — Useful signal, worth monitoring ===
+
+    - name: "The Generalist"
+      author: "Mario Gabriele"
+      rss_url: "https://www.readthegeneralist.com/feed"
+      tier: B
+      domains: [startups, investing, deep-dives]
+      notes: "Deep dives on frontier tech companies."
+
+    - name: "Gary Marcus on AI"
+      author: "Gary Marcus"
+      rss_url: "https://garymarcus.substack.com/feed"
+      tier: B
+      domains: [ai, skepticism, alignment, evaluation]
+      notes: "AI skeptic perspective. Useful for contradiction tracking."
+
+    - name: "Uncharted Territories"
+      author: "Tomas Pueyo"
+      rss_url: "https://tomaspueyo.substack.com/feed"
+      tier: B
+      domains: [geopolitics, macro, history, demographics]
+      notes: "Historical and demographic analysis of macro trends."
+
+    - name: "Lenny's Newsletter"
+      author: "Lenny Rachitsky"
+      rss_url: "https://www.lennysnewsletter.com/feed"
+      tier: B
+      domains: [startups, product, ai-products, growth]
+      notes: "Product and growth. Good for AI product adoption signals."
+
 markets:
   sources:
     - name: polymarket

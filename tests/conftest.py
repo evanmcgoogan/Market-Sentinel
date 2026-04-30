@@ -103,6 +103,34 @@ youtube:
       tier: S
       domains: [ai, technology]
 
+arxiv:
+  categories:
+    - id: cs.AI
+      label: "Artificial Intelligence"
+      tier: A
+      domains: [ai, deep-learning]
+    - id: cs.LG
+      label: "Machine Learning"
+      tier: A
+      domains: [ai, ml]
+  author_watchlist:
+    - name: "Test Researcher"
+      tier: S
+      domains: [ai]
+
+substack:
+  newsletters:
+    - name: "Not Boring"
+      author: "Packy McCormick"
+      rss_url: "https://www.notboring.co/feed"
+      tier: A
+      domains: [ai, startups]
+    - name: "Noahpinion"
+      author: "Noah Smith"
+      rss_url: "https://noahpinion.substack.com/feed"
+      tier: A
+      domains: [macro, economics]
+
 markets:
   sources:
     - name: polymarket
@@ -141,10 +169,12 @@ markets:
     monkeypatch.setattr(brain_io, "brain_root", root_fn)
 
     # Also patch in extract.py, compile.py, serve.py, synthesize.py if they've been imported
-    for mod_name in ("extract", "compile", "serve", "synthesize"):
+    for mod_name in ("extract", "compile", "serve", "synthesize",
+                     "ingest_arxiv", "ingest_substack"):
         try:
             mod = __import__(mod_name)
-            monkeypatch.setattr(mod, "brain_root", root_fn)
+            if hasattr(mod, "brain_root"):
+                monkeypatch.setattr(mod, "brain_root", root_fn)
             # Reset compile.py template cache
             if hasattr(mod, "reset_template_cache"):
                 mod.reset_template_cache()

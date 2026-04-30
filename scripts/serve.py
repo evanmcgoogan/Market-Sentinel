@@ -6,7 +6,7 @@ market-aware schedule. Three modes (Active, Watch, Sleep) adjust polling
 intervals based on time of day and market hours.
 
 Pipeline:
-    ingest (Twitter, YouTube, markets)
+    ingest (Twitter, YouTube, markets, arXiv, newsletters)
     → extract (Haiku: raw → structured JSON)
     → compile (Sonnet: extractions → wiki pages)
     → synthesize (Sonnet/Opus: wiki + extractions → intelligence output)
@@ -102,6 +102,8 @@ def get_intervals(mode: str, config: dict[str, Any]) -> dict[str, int]:
         "twitter": mode_cfg.get("twitter_poll_minutes", 30),
         "youtube": mode_cfg.get("youtube_check_minutes", 60),
         "markets": mode_cfg.get("market_poll_minutes", 60),
+        "arxiv": mode_cfg.get("arxiv_poll_minutes", 240),
+        "substack": mode_cfg.get("substack_poll_minutes", 240),
     }
 
 
@@ -165,6 +167,32 @@ async def run_market_ingestion() -> None:
     except Exception as e:
         _record_run("markets", False, str(e))
         logger.error("Market ingestion failed: %s", e)
+
+
+async def run_arxiv_ingestion() -> None:
+    """Run arXiv paper ingestion for configured categories and author watchlist."""
+    logger.info("Running arXiv ingestion...")
+    try:
+        from ingest_arxiv import ingest_all
+        result = await ingest_all()
+        _record_run("arxiv", True)
+        logger.info("arXiv ingestion complete: %s", result)
+    except Exception as e:
+        _record_run("arxiv", False, str(e))
+        logger.error("arXiv ingestion failed: %s", e)
+
+
+async def run_substack_ingestion() -> None:
+    """Run newsletter ingestion for configured Substack/RSS feeds."""
+    logger.info("Running newsletter ingestion...")
+    try:
+        from ingest_substack import ingest_all
+        result = await ingest_all()
+        _record_run("substack", True)
+        logger.info("Newsletter ingestion complete: %s", result)
+    except Exception as e:
+        _record_run("substack", False, str(e))
+        logger.error("Newsletter ingestion failed: %s", e)
 
 
 async def run_extraction() -> None:
@@ -297,6 +325,8 @@ async def run_full_cycle() -> dict[str, Any]:
         run_twitter_ingestion(),
         run_youtube_ingestion(),
         run_market_ingestion(),
+        run_arxiv_ingestion(),
+        run_substack_ingestion(),
     )
 
     # Step 2: Extract signals from new raw files
