@@ -324,3 +324,135 @@ class TestSynthesisIntegration:
         assert "synthesis" in result
         # synthesis dict may be empty on a fresh brain — that's fine
         assert isinstance(result["synthesis"], dict)
+
+
+# ---------------------------------------------------------------------------
+# Stream endpoints (typed Update feed)
+# ---------------------------------------------------------------------------
+
+
+def _write_update(tmp_brain, update_dict, day="2026-05-18"):
+    """Helper: write an update JSON file."""
+    import json
+    d = tmp_brain / "updates" / day
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{update_dict['update_id']}.json").write_text(json.dumps(update_dict, default=str))
+
+
+def _make_update(update_id, tier="feed", type_="synthesis",
+                 created="2026-05-18T12:00:00+00:00"):
+    return {
+        "update_id": update_id,
+        "type": type_,
+        "priority_tier": tier,
+        "headline": f"Headline for {update_id}",
+        "body": "Body content",
+        "affected_pages": [],
+        "affected_theses": ["ai-infrastructure-supercycle"],
+        "source_evidence": ["wiki/syntheses/x.md"],
+        "confidence_score": 80,
+        "recommendation": None,
+        "created_at": created,
+        "expires_at": None,
+        "actions": [{"label": "Dismiss", "action": "dismiss"}],
+        "user_state": "unread",
+    }
+
+
+class TestStreamEndpoints:
+    @pytest.mark.asyncio
+    async def test_inbox_returns_only_inbox_tier(self, tmp_brain):
+        _write_update(tmp_brain, _make_update("a", tier="inbox"))
+        _write_update(tmp_brain, _make_update("b", tier="feed"))
+        _write_update(tmp_brain, _make_update("c", tier="archive"))
+
+        result = await serve.stream_inbox()
+        assert result["tier"] == "inbox"
+        assert result["count"] == 1
+        assert result["updates"][0]["update_id"] == "a"
+
+    @pytest.mark.asyncio
+    async def test_inbox_respects_limit(self, tmp_brain):
+        for i in range(60):
+            _write_update(tmp_brain, _make_update(f"u{i}", tier="inbox"))
+        result = await serve.stream_inbox(limit=10)
+        assert len(result["updates"]) == 10
+
+    @pytest.mark.asyncio
+    async def test_stream_default_returns_feed(self, tmp_brain):
+        _write_update(tmp_brain, _make_update("x", tier="feed"))
+        _write_update(tmp_brain, _make_update("y", tier="inbox"))
+        result = await serve.stream()
+        assert result["tier"] == "feed"
+        assert result["count"] == 1
+        assert result["updates"][0]["update_id"] == "x"
+
+    @pytest.mark.asyncio
+    async def test_stream_unknown_tier_errors(self, tmp_brain):
+        result = await serve.stream(tier="invalid")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_stream_type_filter(self, tmp_brain):
+        _write_update(tmp_brain, _make_update("a", tier="feed", type_="synthesis"))
+        _write_update(tmp_brain, _make_update("b", tier="feed", type_="thesis_pressure"))
+        result = await serve.stream(tier="feed", type="synthesis")
+        assert result["count"] == 1
+        assert result["updates"][0]["type"] == "synthesis"
+
+    @pytest.mark.asyncio
+    async def test_stream_since_filter(self, tmp_brain):
+        _write_update(tmp_brain, _make_update("old", tier="feed",
+                       created="2026-05-01T00:00:00+00:00"))
+        _write_update(tmp_brain, _make_update("new", tier="feed",
+                       created="2026-05-18T12:00:00+00:00"))
+        result = await serve.stream(tier="feed", since="2026-05-10T00:00:00+00:00")
+        assert result["count"] == 1
+        assert result["updates"][0]["update_id"] == "new"
+
+    @pytest.mark.asyncio
+    async def test_get_update_by_id(self, tmp_brain):
+        _write_update(tmp_brain, _make_update("xyz", tier="inbox"))
+        result = await serve.get_update("xyz")
+        assert result["update_id"] == "xyz"
+
+    @pytest.mark.asyncio
+    async def test_get_update_not_found(self, tmp_brain):
+        result = await serve.get_update("nonexistent")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_update_action_dismiss(self, tmp_brain):
+        _write_update(tmp_brain, _make_update("dismiss-me", tier="feed"))
+        result = await serve.update_action("dismiss-me", {"action": "dismiss"})
+        assert result["ok"] is True
+        assert result["user_state"] == "dismissed"
+
+        followup = await serve.get_update("dismiss-me")
+        assert followup["user_state"] == "dismissed"
+
+    @pytest.mark.asyncio
+    async def test_update_action_unknown(self, tmp_brain):
+        _write_update(tmp_brain, _make_update("a", tier="feed"))
+        result = await serve.update_action("a", {"action": "bogus"})
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_update_action_not_found(self, tmp_brain):
+        result = await serve.update_action("nonexistent", {"action": "dismiss"})
+        assert "error" in result
+
+
+class TestScoringIntegration:
+    @pytest.mark.asyncio
+    async def test_run_scoring_succeeds_with_empty_brain(self, tmp_brain):
+        serve._run_counts.clear()
+        serve._errors.clear()
+        await serve.run_scoring()
+        assert serve._run_counts.get("score", 0) == 1
+        assert "score" not in serve._errors
+
+    @pytest.mark.asyncio
+    async def test_trigger_score_endpoint(self, tmp_brain):
+        result = await serve.trigger_score()
+        assert result["triggered"] is True

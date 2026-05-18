@@ -170,7 +170,7 @@ markets:
 
     # Also patch in extract.py, compile.py, serve.py, synthesize.py if they've been imported
     for mod_name in ("extract", "compile", "serve", "synthesize",
-                     "ingest_arxiv", "ingest_substack"):
+                     "ingest_arxiv", "ingest_substack", "score"):
         try:
             mod = __import__(mod_name)
             if hasattr(mod, "brain_root"):

@@ -40,7 +40,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -262,6 +262,28 @@ async def run_synthesis(subtype: str = "intraday-brief") -> None:
         logger.error("Synthesis failed (%s): %s", subtype, e)
 
 
+async def run_scoring() -> None:
+    """Run the SCORE stage to emit typed Stream Updates.
+
+    Runs after compile and synthesize. Each emitted update is a JSON file in
+    updates/YYYY-MM-DD/. Tier is computed deterministically; body text is
+    deterministic for now (Sonnet enrichment is a future enhancement).
+    """
+    logger.info("Running SCORE stage...")
+    try:
+        from score import score_all
+        result = await asyncio.to_thread(lambda: score_all())
+        _record_run("score", True)
+        total = sum(result.get("emitted_by_type", {}).values())
+        logger.info(
+            "SCORE complete: %d emitted, %d archived | breakdown: %s",
+            total, result.get("archived", 0), result.get("emitted_by_type", {}),
+        )
+    except Exception as e:
+        _record_run("score", False, str(e))
+        logger.error("SCORE failed: %s", e)
+
+
 async def run_event_driven_synthesis() -> None:
     """Check for a high-signal burst and trigger event-driven synthesis if warranted.
 
@@ -337,6 +359,11 @@ async def run_full_cycle() -> dict[str, Any]:
 
     # Step 4: Check for event-driven synthesis trigger (burst of high-signal extractions)
     await run_event_driven_synthesis()
+
+    # Step 5: Run SCORE stage to emit typed Stream Updates
+    # Runs after both compile and synthesize so it can wrap synthesis briefs
+    # AND detect thesis pressure from compile output in the same pass.
+    await run_scoring()
 
     elapsed = (utcnow() - cycle_start).total_seconds()
     append_log(f"CYCLE COMPLETE | mode: {mode} | elapsed: {elapsed:.1f}s")
@@ -447,7 +474,7 @@ def build_scheduler(config: dict[str, Any]) -> AsyncIOScheduler:
 # FastAPI health endpoint
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Signal Hunter Brain", version="3.0.0")
+app = FastAPI(title="Meridian", version="3.0.0")
 
 
 @app.get("/health")
@@ -533,6 +560,129 @@ async def trigger_synthesis(subtype: str) -> dict[str, Any]:
         return {"error": f"unknown subtype: {subtype!r}. Valid: {sorted(valid)}"}
     await run_synthesis(subtype)
     return {"triggered": True, "subtype": subtype}
+
+
+@app.post("/trigger/score")
+async def trigger_score() -> dict[str, Any]:
+    """Manually trigger the SCORE stage."""
+    await run_scoring()
+    return {"triggered": True}
+
+
+# ---------------------------------------------------------------------------
+# Stream endpoints — typed Update feed for the mobile UI
+# ---------------------------------------------------------------------------
+
+def _load_all_updates() -> list[dict[str, Any]]:
+    """Walk updates/ and return all updates as dicts. Sorted newest-first."""
+    import json
+    updates_root = brain_root() / "updates"
+    if not updates_root.exists():
+        return []
+
+    items: list[dict[str, Any]] = []
+    for json_path in updates_root.rglob("*.json"):
+        if json_path.name.startswith("."):
+            continue
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            data["_path"] = str(json_path.relative_to(brain_root()))
+            items.append(data)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    # Sort newest-first by created_at
+    items.sort(key=lambda u: u.get("created_at", ""), reverse=True)
+    return items
+
+
+@app.get("/stream/inbox")
+async def stream_inbox(limit: int = 50) -> dict[str, Any]:
+    """Return inbox-tier updates (high-confidence, thesis-anchored).
+
+    Mobile app polls this endpoint as the primary surface.
+    """
+    items = [u for u in _load_all_updates() if u.get("priority_tier") == "inbox"]
+    return {
+        "tier": "inbox",
+        "count": len(items),
+        "updates": items[:limit],
+    }
+
+
+@app.get("/stream")
+async def stream(
+    tier: str = "feed",
+    since: Optional[str] = None,
+    limit: int = 50,
+    type: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return updates filtered by tier and optional since-timestamp.
+
+    Query params:
+        tier   — inbox | feed | archive (default: feed)
+        since  — ISO8601 timestamp; only updates after this time
+        limit  — max items to return (default 50)
+        type   — restrict to one update type (synthesis, thesis_pressure, etc.)
+    """
+    valid_tiers = {"inbox", "feed", "archive"}
+    if tier not in valid_tiers:
+        return {"error": f"unknown tier: {tier!r}. Valid: {sorted(valid_tiers)}"}
+
+    items = [u for u in _load_all_updates() if u.get("priority_tier") == tier]
+    if type:
+        items = [u for u in items if u.get("type") == type]
+    if since:
+        items = [u for u in items if u.get("created_at", "") > since]
+
+    return {
+        "tier": tier,
+        "count": len(items),
+        "updates": items[:limit],
+    }
+
+
+@app.get("/update/{update_id}")
+async def get_update(update_id: str) -> dict[str, Any]:
+    """Fetch a single update by ID. Returns the full update record."""
+    for u in _load_all_updates():
+        if u.get("update_id") == update_id:
+            return u
+    return {"error": f"update not found: {update_id}"}
+
+
+@app.post("/update/{update_id}/action")
+async def update_action(update_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Apply a user action to an update.
+
+    Body: {"action": "dismiss" | "read" | "promote"}
+
+    Mutates the `user_state` field on the update file. All other fields are immutable.
+    """
+    import json
+    action = body.get("action", "").lower()
+    valid_actions = {"dismiss": "dismissed", "read": "read", "promote": "promoted", "unread": "unread"}
+    if action not in valid_actions:
+        return {"error": f"unknown action: {action!r}. Valid: {sorted(valid_actions)}"}
+
+    updates_root = brain_root() / "updates"
+    if not updates_root.exists():
+        return {"error": "no updates directory"}
+
+    for json_path in updates_root.rglob("*.json"):
+        if json_path.name.startswith("."):
+            continue
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("update_id") != update_id:
+            continue
+        data["user_state"] = valid_actions[action]
+        json_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        return {"ok": True, "update_id": update_id, "user_state": data["user_state"]}
+
+    return {"error": f"update not found: {update_id}"}
 
 
 # ---------------------------------------------------------------------------
