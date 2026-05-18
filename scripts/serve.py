@@ -496,13 +496,31 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start the APScheduler when FastAPI boots; stop it on shutdown."""
+    """Start the APScheduler when FastAPI boots; stop it on shutdown.
+
+    Also schedules a one-shot full_cycle 60 seconds after boot, so the brain
+    starts producing signal immediately instead of waiting for the first
+    10-minute interval to elapse.
+    """
     config = load_schedule_config()
     scheduler = build_scheduler(config)
     scheduler.start()
     app.state.scheduler = scheduler
+
+    # Boot-time first cycle: fire 60s after startup. The delay lets the
+    # healthcheck pass cleanly and lets the runtime stabilize before we hit
+    # external APIs hard.
+    from apscheduler.triggers.date import DateTrigger
+    scheduler.add_job(
+        run_full_cycle,
+        DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=60)),
+        id="boot_cycle",
+        name="One-shot full cycle on boot",
+        misfire_grace_time=300,
+    )
+
     append_log(f"SERVE STARTED | mode: {current_mode()}")
-    logger.info("Scheduler started; mode: %s", current_mode())
+    logger.info("Scheduler started; mode: %s; boot cycle queued for +60s", current_mode())
     try:
         yield
     finally:
@@ -581,9 +599,17 @@ async def status() -> dict[str, Any]:
 
 @app.post("/trigger")
 async def trigger_cycle() -> dict[str, Any]:
-    """Manually trigger a full pipeline cycle."""
-    result = await run_full_cycle()
-    return {"triggered": True, "result": result}
+    """Kick off a full pipeline cycle in the background.
+
+    Returns immediately. The cycle itself takes 3-8 minutes (network I/O for
+    ingestion + LLM calls for extraction/compilation). Poll /status to see
+    progress — `scheduler.run_counts` will populate as steps complete.
+    """
+    asyncio.create_task(run_full_cycle())
+    return {
+        "triggered": True,
+        "note": "Cycle running in background. Poll /status for progress.",
+    }
 
 
 @app.post("/trigger/synthesis/{subtype}")
@@ -595,15 +621,15 @@ async def trigger_synthesis(subtype: str) -> dict[str, Any]:
     valid = {"intraday-brief", "daily-wrap", "weekly-deep", "monthly-review", "event-driven"}
     if subtype not in valid:
         return {"error": f"unknown subtype: {subtype!r}. Valid: {sorted(valid)}"}
-    await run_synthesis(subtype)
-    return {"triggered": True, "subtype": subtype}
+    asyncio.create_task(run_synthesis(subtype))
+    return {"triggered": True, "subtype": subtype, "note": "Running in background."}
 
 
 @app.post("/trigger/score")
 async def trigger_score() -> dict[str, Any]:
-    """Manually trigger the SCORE stage."""
-    await run_scoring()
-    return {"triggered": True}
+    """Kick off the SCORE stage in the background."""
+    asyncio.create_task(run_scoring())
+    return {"triggered": True, "note": "Running in background."}
 
 
 # ---------------------------------------------------------------------------
