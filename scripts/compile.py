@@ -750,8 +750,15 @@ async def compile_all(
     file_filter: str | None = None,
     use_llm: bool = True,
     dry_run: bool = False,
+    max_files_per_run: int = 75,
 ) -> dict[str, Any]:
-    """Compile all pending extractions (or a single file)."""
+    """Compile pending extractions into wiki pages.
+
+    Per-cycle compile is capped at max_files_per_run (default 75) to keep
+    cycle time bounded. Wiki page updates are kept sequential to avoid races
+    when multiple extractions touch the same entity. The remainder of the
+    queue is processed in subsequent cycles.
+    """
     if file_filter:
         files = [file_filter]
     else:
@@ -761,7 +768,15 @@ async def compile_all(
         logger.info("No uncompiled extractions found")
         return {"files_processed": 0}
 
-    logger.info("Found %d extractions to compile", len(files))
+    total_pending = len(files)
+    if total_pending > max_files_per_run and not file_filter:
+        logger.info(
+            "Found %d uncompiled extractions; processing %d this cycle, deferring %d",
+            total_pending, max_files_per_run, total_pending - max_files_per_run,
+        )
+        files = files[:max_files_per_run]
+    else:
+        logger.info("Found %d extractions to compile", total_pending)
 
     totals = {
         "files_processed": 0,
@@ -770,6 +785,7 @@ async def compile_all(
         "pages_updated": 0,
         "pages_created": 0,
         "contradictions_created": 0,
+        "files_pending_next_cycle": max(0, total_pending - max_files_per_run),
     }
 
     for filepath in files:
@@ -798,7 +814,8 @@ async def compile_all(
             f"succeeded: {totals['files_succeeded']} | "
             f"pages updated: {totals['pages_updated']} | "
             f"pages created: {totals['pages_created']} | "
-            f"contradictions: {totals['contradictions_created']}"
+            f"contradictions: {totals['contradictions_created']} | "
+            f"pending_next: {totals['files_pending_next_cycle']}"
         )
 
     return totals

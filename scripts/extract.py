@@ -528,8 +528,17 @@ async def extract_all(
     file_filter: str | None = None,
     use_llm: bool = True,
     dry_run: bool = False,
+    max_files_per_run: int = 150,
+    concurrency: int = 8,
 ) -> dict[str, Any]:
-    """Run extraction on all unextracted raw files (or a single file)."""
+    """Run extraction on unextracted raw files.
+
+    Files are processed in parallel with a concurrency cap (default 8).
+    Per-cycle extraction is capped at max_files_per_run (default 150) so the
+    downstream compile + score stages always run on a recent batch even when
+    the backlog is large. The unprocessed remainder is picked up on the next
+    cycle.
+    """
     if file_filter:
         files = [file_filter]
     else:
@@ -539,7 +548,15 @@ async def extract_all(
         logger.info("No unextracted files found")
         return {"files_processed": 0}
 
-    logger.info("Found %d files to extract", len(files))
+    total_pending = len(files)
+    if total_pending > max_files_per_run and not file_filter:
+        logger.info(
+            "Found %d unextracted files; processing %d this cycle, deferring %d",
+            total_pending, max_files_per_run, total_pending - max_files_per_run,
+        )
+        files = files[:max_files_per_run]
+    else:
+        logger.info("Found %d files to extract", total_pending)
 
     totals = {
         "files_processed": 0,
@@ -549,12 +566,26 @@ async def extract_all(
         "medium_signal": 0,
         "noise": 0,
         "total_extractions": 0,
+        "files_pending_next_cycle": max(0, total_pending - max_files_per_run),
     }
 
-    for filepath in files:
-        result = await extract_file(filepath, use_llm=use_llm, dry_run=dry_run)
-        totals["files_processed"] += 1
+    semaphore = asyncio.Semaphore(concurrency)
 
+    async def _process(filepath: str) -> dict[str, Any] | None:
+        async with semaphore:
+            return await extract_file(filepath, use_llm=use_llm, dry_run=dry_run)
+
+    results = await asyncio.gather(
+        *[_process(fp) for fp in files],
+        return_exceptions=True,
+    )
+
+    for result in results:
+        totals["files_processed"] += 1
+        if isinstance(result, Exception):
+            totals["files_failed"] += 1
+            logger.error("Extraction exception: %s", result)
+            continue
         if result:
             totals["files_succeeded"] += 1
             totals["total_extractions"] += result.get("extraction_count", 0)
@@ -563,10 +594,6 @@ async def extract_all(
         elif not dry_run:
             totals["files_failed"] += 1
 
-        # Rate limit between LLM calls
-        if use_llm and not dry_run:
-            await asyncio.sleep(0.5)
-
     if not dry_run:
         append_log(
             f"EXTRACT BATCH complete | "
@@ -574,7 +601,8 @@ async def extract_all(
             f"succeeded: {totals['files_succeeded']} | "
             f"high: {totals['high_signal']} | "
             f"medium: {totals['medium_signal']} | "
-            f"noise: {totals['noise']}"
+            f"noise: {totals['noise']} | "
+            f"pending_next: {totals['files_pending_next_cycle']}"
         )
 
     return totals
