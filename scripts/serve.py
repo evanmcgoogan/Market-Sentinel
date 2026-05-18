@@ -483,10 +483,35 @@ def build_scheduler(config: dict[str, Any]) -> AsyncIOScheduler:
 
 
 # ---------------------------------------------------------------------------
-# FastAPI health endpoint
+# FastAPI app with lifespan-managed scheduler
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Meridian", version="3.0.0")
+# We start the APScheduler AsyncIOScheduler inside FastAPI's lifespan context,
+# not in main(), because AsyncIOScheduler.start() calls asyncio.get_running_loop()
+# which requires an already-running event loop. uvicorn creates that loop when
+# it starts the app; the lifespan startup phase runs inside it.
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start the APScheduler when FastAPI boots; stop it on shutdown."""
+    config = load_schedule_config()
+    scheduler = build_scheduler(config)
+    scheduler.start()
+    app.state.scheduler = scheduler
+    append_log(f"SERVE STARTED | mode: {current_mode()}")
+    logger.info("Scheduler started; mode: %s", current_mode())
+    try:
+        yield
+    finally:
+        scheduler.shutdown(wait=False)
+        append_log("SERVE STOPPED")
+        logger.info("Scheduler stopped")
+
+
+app = FastAPI(title="Meridian", version="3.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -720,15 +745,9 @@ def main() -> None:
         logger.info("Cycle result: %s", result)
         return
 
-    # Start scheduler
-    config = load_schedule_config()
-    scheduler = build_scheduler(config)
-    scheduler.start()
-
-    append_log(f"SERVE STARTED | port: {args.port} | mode: {current_mode()}")
+    # The scheduler is started by FastAPI's lifespan handler (inside the asyncio
+    # loop uvicorn creates). main() just configures logging and launches uvicorn.
     logger.info("Brain server starting on port %d in %s mode", args.port, current_mode())
-
-    # Run FastAPI with uvicorn
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
 
 
