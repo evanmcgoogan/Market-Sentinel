@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "signal-hunter-brain"
@@ -34,6 +34,12 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
 ]
+
+[tool.setuptools]
+# Meridian runs scripts directly (python scripts/serve.py); it is not an importable
+# package. Telling setuptools there are no Python modules to install lets
+# `pip install -e .` succeed cleanly when used (it installs only the deps above).
+py-modules = []
 
 [tool.ruff]
 target-version = "py312"
