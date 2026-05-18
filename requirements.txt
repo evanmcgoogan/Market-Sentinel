@@ -1,7 +1,6 @@
-# V3 Signal Hunter — Digital Brain
+# Meridian — Digital Brain
 # Canonical dependency source is pyproject.toml.
-# This file exists only for tools/environments that don't support PEP 517.
-# Install with: pip install -e .
+# Railway uses this file directly: `pip install -r requirements.txt`.
 
 aiohttp>=3.9,<4.0
 requests>=2.31,<3.0
@@ -12,3 +11,7 @@ apscheduler>=3.10,<4.0
 pyyaml>=6.0,<7.0
 feedparser>=6.0,<7.0
 youtube-transcript-api>=0.6,<1.0
+# Bundled IANA timezone data — required on slim Linux containers (Railway, etc.)
+# where OS-level tzdata isn't installed. Without this, ZoneInfo() throws
+# ZoneInfoNotFoundError and current_mode() crashes the /health endpoint.
+tzdata>=2024.1

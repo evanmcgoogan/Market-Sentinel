@@ -38,7 +38,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -71,13 +71,25 @@ def current_mode() -> str:
     """Determine which polling mode to use based on current ET time.
 
     Returns: "active" | "watch" | "sleep"
+
+    Falls back to UTC with a 4-hour offset approximation if ZoneInfo data is
+    unavailable. We never want a timezone error to crash /health, since the
+    healthcheck failing prevents Railway from marking the deploy as live.
     """
     try:
-        from zoneinfo import ZoneInfo
-    except ImportError:
-        from backports.zoneinfo import ZoneInfo
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            from backports.zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception as e:
+        logger.warning(
+            "Timezone lookup failed (%s); falling back to UTC-4 approximation. "
+            "Install the `tzdata` Python package to fix.", e,
+        )
+        # Crude fallback: pretend UTC offset is -4. Not DST-aware but won't crash.
+        now = datetime.now(timezone.utc) - timedelta(hours=4)
 
-    now = datetime.now(ZoneInfo("America/New_York"))
     weekday = now.weekday()  # 0=Mon, 6=Sun
     hour, minute = now.hour, now.minute
     time_val = hour * 60 + minute  # minutes since midnight
