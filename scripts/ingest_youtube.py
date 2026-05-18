@@ -38,27 +38,82 @@ from brain_io import (
 logger = logging.getLogger(__name__)
 
 YOUTUBE_RSS_BASE = "https://www.youtube.com/feeds/videos.xml"
+YOUTUBE_DATA_API_BASE = "https://www.googleapis.com/youtube/v3"
 MAX_TRANSCRIPT_RETRIES = 2
 # YouTube RSS feeds have known intermittent 404 outages (platform-side issue, Feb-Apr 2026+).
-# We retry with backoff to handle transient failures gracefully.
+# We prefer YouTube Data API when YOUTUBE_API_KEY is set, fall back to RSS otherwise.
 RSS_RETRY_ATTEMPTS = 3
 RSS_RETRY_BACKOFF_S = 5.0
+# Data API: playlistItems.list costs 1 unit. Free tier is 10K/day. 30 channels × 1 = 30/day.
+DATA_API_MAX_RESULTS = 15
 
 
 # ---------------------------------------------------------------------------
-# RSS feed parsing
+# Discovery — preferred path is YouTube Data API; RSS is fallback
 # ---------------------------------------------------------------------------
 
-async def fetch_channel_feed(
+def _channel_id_to_uploads_playlist(channel_id: str) -> str:
+    """The 'uploads' playlist ID for a channel is the channel ID with UC→UU prefix swap."""
+    if channel_id.startswith("UC") and len(channel_id) > 2:
+        return "UU" + channel_id[2:]
+    # Fallback: assume it's already a playlist ID
+    return channel_id
+
+
+async def fetch_channel_feed_data_api(
+    session: aiohttp.ClientSession, channel_id: str, api_key: str
+) -> list[dict[str, str]]:
+    """Fetch recent videos via YouTube Data API (playlistItems.list).
+
+    Costs 1 quota unit per channel. Free tier (10,000 units/day) easily covers
+    our 30 channels.
+    """
+    playlist_id = _channel_id_to_uploads_playlist(channel_id)
+    params = {
+        "part": "snippet",
+        "playlistId": playlist_id,
+        "maxResults": DATA_API_MAX_RESULTS,
+        "key": api_key,
+    }
+    url = f"{YOUTUBE_DATA_API_BASE}/playlistItems"
+
+    try:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                body_preview = (await resp.text())[:300]
+                logger.warning(
+                    "YouTube Data API failed for %s: HTTP %d — %s",
+                    channel_id, resp.status, body_preview,
+                )
+                return []
+            data = await resp.json()
+    except Exception as e:
+        logger.error("YouTube Data API error for %s: %s", channel_id, e)
+        return []
+
+    videos: list[dict[str, str]] = []
+    for item in data.get("items", []):
+        snippet = item.get("snippet", {})
+        resource_id = snippet.get("resourceId", {})
+        video_id = resource_id.get("videoId") or ""
+        title = snippet.get("title") or ""
+        published_at = snippet.get("publishedAt", "")[:10]  # YYYY-MM-DD
+        if not video_id or not title or title.lower() == "private video":
+            continue
+        videos.append({
+            "video_id": video_id,
+            "title": title,
+            "published": published_at,
+            "link": f"https://www.youtube.com/watch?v={video_id}",
+        })
+
+    return videos
+
+
+async def fetch_channel_feed_rss(
     session: aiohttp.ClientSession, channel_id: str
 ) -> list[dict[str, str]]:
-    """Fetch recent videos from a YouTube channel's RSS feed.
-
-    Returns list of dicts with: video_id, title, published, link.
-
-    Retries up to RSS_RETRY_ATTEMPTS times with backoff to handle YouTube's
-    intermittent RSS 404 outages (platform-side issue, not a channel ID problem).
-    """
+    """Fallback discovery via YouTube RSS Atom feed. Subject to intermittent 404 outages."""
     url = f"{YOUTUBE_RSS_BASE}?channel_id={channel_id}"
     last_status: int | None = None
 
@@ -81,6 +136,24 @@ async def fetch_channel_feed(
         channel_id, RSS_RETRY_ATTEMPTS, last_status or "connection error",
     )
     return []
+
+
+async def fetch_channel_feed(
+    session: aiohttp.ClientSession, channel_id: str
+) -> list[dict[str, str]]:
+    """Discover recent videos for a channel.
+
+    Uses YouTube Data API when YOUTUBE_API_KEY env var is set (cheap, reliable).
+    Falls back to RSS Atom feed otherwise (free but currently flaky).
+    """
+    import os
+    api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
+    if api_key:
+        videos = await fetch_channel_feed_data_api(session, channel_id, api_key)
+        if videos:
+            return videos
+        logger.info("Data API returned no videos for %s; trying RSS fallback", channel_id)
+    return await fetch_channel_feed_rss(session, channel_id)
 
 
 def parse_atom_feed(xml_text: str) -> list[dict[str, str]]:
