@@ -345,23 +345,42 @@ async def run_git_commit() -> None:
 async def run_full_cycle() -> dict[str, Any]:
     """Run one complete ingestion → extraction → compilation → synthesis cycle.
 
-    Steps run sequentially so each stage has the latest output from the previous.
-    Synthesis only fires if there's a high-signal burst (event-driven trigger);
-    scheduled synthesis runs on separate cron jobs in the scheduler.
+    Steps run sequentially; ingestion is parallelized with a hard timeout so a
+    slow ingester (typically Twitter polling 126 accounts) can't block
+    extraction. Slow ingesters resume next cycle.
     """
+    # Cap the parallel ingestion phase. Twitter especially can take 4-6 minutes
+    # for 126 accounts; arXiv ~1 minute with politeness delays. If any individual
+    # ingester hangs on a single slow request, we still proceed with what we got.
+    INGESTION_TIMEOUT_S = 300  # 5 minutes
+
     cycle_start = utcnow()
     mode = current_mode()
     logger.info("Starting full cycle in %s mode", mode)
     append_log(f"CYCLE START | mode: {mode}")
 
-    # Step 1: Ingest from all sources (parallel — they're independent)
-    await asyncio.gather(
-        run_twitter_ingestion(),
-        run_youtube_ingestion(),
-        run_market_ingestion(),
-        run_arxiv_ingestion(),
-        run_substack_ingestion(),
-    )
+    # Step 1: Ingest from all sources (parallel — they're independent).
+    # return_exceptions=True so one failing/timed-out ingester doesn't cancel
+    # the others, and wait_for() to hard-cap the whole phase.
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                run_twitter_ingestion(),
+                run_youtube_ingestion(),
+                run_market_ingestion(),
+                run_arxiv_ingestion(),
+                run_substack_ingestion(),
+                return_exceptions=True,
+            ),
+            timeout=INGESTION_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Ingestion phase exceeded %ds — proceeding to extraction with partial data. "
+            "Slow ingesters (likely twitter/arxiv) will resume next cycle.",
+            INGESTION_TIMEOUT_S,
+        )
+        append_log(f"CYCLE INGESTION TIMEOUT at {INGESTION_TIMEOUT_S}s — proceeding")
 
     # Step 2: Extract signals from new raw files
     await run_extraction()
